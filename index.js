@@ -2,8 +2,12 @@
     'use strict';
 
     const MODULE = 'YuzukiMemorySafeGuard';
-    const VERSION = '0.1.1';
+    const VERSION = '0.1.2';
     const PATCHED = Symbol.for('yuzuki.memory.safe.guard.patched');
+    const STARTUP_RETRY_MS = 500;
+    const STARTUP_RETRY_LIMIT = 40; // 最多等待柚月加载 20 秒
+    const BACKGROUND_RECHECK_MS = 60000; // 仅每分钟兜底一次
+
     const SETTINGS_KEYS = {
         plugin: 'yzm_memory_global_plugin_settings',
         autoSummary: 'yzm_memory_global_auto_summary_settings',
@@ -11,19 +15,14 @@
 
     const state = {
         version: VERSION,
-        timer: null,
+        startupTimer: null,
+        backgroundTimer: null,
+        startupAttempts: 0,
         patchCount: 0,
         blockedCalls: 0,
         lastPatchAt: null,
+        started: false,
     };
-
-    function getContext() {
-        try {
-            return globalThis.SillyTavern?.getContext?.() ?? null;
-        } catch {
-            return null;
-        }
-    }
 
     function toast(type, message) {
         try {
@@ -31,9 +30,7 @@
                 globalThis.toastr[type](message, '柚月记忆安全护栏');
                 return;
             }
-        } catch {
-            // Console fallback below.
-        }
+        } catch {}
         console.log(`[${MODULE}] ${message}`);
     }
 
@@ -45,9 +42,7 @@
                 enumerable: false,
                 writable: false,
             });
-        } catch {
-            // Ignore non-critical metadata failure.
-        }
+        } catch {}
         return fn;
     }
 
@@ -75,9 +70,7 @@
         for (const [key, field] of safePairs) {
             try {
                 let settings = YuzukiMemory?.GlobalSettings?.get?.(key, {}) ?? {};
-                if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
-                    settings = {};
-                }
+                if (!settings || typeof settings !== 'object' || Array.isArray(settings)) settings = {};
                 if (settings[field] !== false) {
                     settings[field] = false;
                     YuzukiMemory?.GlobalSettings?.set?.(key, settings);
@@ -106,45 +99,29 @@
         const replacements = {
             loadSettings: () => {
                 const original = floorHider.loadSettings;
-                const replacement = markPatched(function safeLoadSettings() {
+                return markPatched(function safeLoadSettings() {
                     let value = {};
                     try {
                         value = original?.[PATCHED] ? {} : original?.() ?? {};
-                    } catch {
-                        value = {};
-                    }
+                    } catch {}
                     return { ...value, hideFloorsEnabled: false };
                 });
-                return replacement;
             },
             loadAutoSummarySettings: () => {
                 const original = floorHider.loadAutoSummarySettings;
-                const replacement = markPatched(function safeLoadAutoSummarySettings() {
+                return markPatched(function safeLoadAutoSummarySettings() {
                     let value = {};
                     try {
                         value = original?.[PATCHED] ? {} : original?.() ?? {};
-                    } catch {
-                        value = {};
-                    }
+                    } catch {}
                     return { ...value, hideSummaryFloors: false };
                 });
-                return replacement;
             },
-            collectIndicesToHide: () => markPatched(function noContextIndices() {
-                return [];
-            }),
-            collectSummaryIndicesToHide: () => markPatched(function noSummaryIndices() {
-                return [];
-            }),
-            applyContextLimitHiding: () => markPatched(function blockContextHiding() {
-                return blockedResult('context_floor_hiding_disabled');
-            }),
-            applySummaryPointerHiding: () => markPatched(function blockSummaryHiding() {
-                return blockedResult('summary_floor_hiding_disabled');
-            }),
-            applyConfiguredHiding: () => markPatched(function blockAllHiding() {
-                return blockedResult('all_floor_hiding_disabled');
-            }),
+            collectIndicesToHide: () => markPatched(() => []),
+            collectSummaryIndicesToHide: () => markPatched(() => []),
+            applyContextLimitHiding: () => markPatched(() => blockedResult('context_floor_hiding_disabled')),
+            applySummaryPointerHiding: () => markPatched(() => blockedResult('summary_floor_hiding_disabled')),
+            applyConfiguredHiding: () => markPatched(() => blockedResult('all_floor_hiding_disabled')),
         };
 
         let changed = false;
@@ -162,48 +139,68 @@
         if (changed) {
             state.patchCount += 1;
             state.lastPatchAt = new Date().toISOString();
-            console.info(`[${MODULE}] 已锁定柚月楼层隐藏功能。`, {
-                patchCount: state.patchCount,
-            });
+            console.info(`[${MODULE}] 已锁定柚月楼层隐藏功能。`);
         }
-
-        return changed;
-    }
-
-    function inspectCurrentChat() {
-        const chat = getContext()?.chat;
-        if (!Array.isArray(chat)) return { taggedHidden: 0 };
-
-        let taggedHidden = 0;
-        for (const message of chat) {
-            if (message?.is_system === true && message?.is_yzm_hidden_floor === true) {
-                taggedHidden += 1;
-            }
-        }
-
-        if (taggedHidden > 0) {
-            console.error(`[${MODULE}] 检测到 ${taggedHidden} 条柚月隐藏消息。护栏不会自动改存档，请立即停用柚月并导出 JSONL。`);
-        }
-
-        return { taggedHidden };
+        return true;
     }
 
     function healthCheck() {
         forceSafeSettings();
-        patchFloorHider();
-        inspectCurrentChat();
+        return patchFloorHider();
+    }
+
+    function stopStartupRetry() {
+        if (state.startupTimer) clearInterval(state.startupTimer);
+        state.startupTimer = null;
+    }
+
+    function beginStartupRetry() {
+        stopStartupRetry();
+        state.startupAttempts = 0;
+
+        const attempt = () => {
+            state.startupAttempts += 1;
+            const ready = healthCheck();
+            if (ready || state.startupAttempts >= STARTUP_RETRY_LIMIT) {
+                stopStartupRetry();
+                if (ready) {
+                    toast('success', '安全护栏已启用：柚月楼层隐藏功能已被锁死。');
+                } else {
+                    console.warn(`[${MODULE}] 暂未检测到柚月；稍后会在回到前台时重新检查。`);
+                }
+            }
+        };
+
+        attempt();
+        if (!globalThis.YuzukiMemory?.FloorHider) {
+            state.startupTimer = setInterval(attempt, STARTUP_RETRY_MS);
+        }
+    }
+
+    function startBackgroundRecheck() {
+        if (state.backgroundTimer) clearInterval(state.backgroundTimer);
+        state.backgroundTimer = setInterval(() => {
+            if (document.visibilityState === 'visible') healthCheck();
+        }, BACKGROUND_RECHECK_MS);
     }
 
     function start() {
-        if (state.timer) clearInterval(state.timer);
-        healthCheck();
-        state.timer = setInterval(healthCheck, 1000);
-        toast('success', '安全护栏已启用：柚月楼层隐藏功能已被锁死。');
+        if (state.started) return;
+        state.started = true;
+        beginStartupRetry();
+        startBackgroundRecheck();
+
+        globalThis.addEventListener('focus', healthCheck, { passive: true });
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') healthCheck();
+        }, { passive: true });
     }
 
     function stop() {
-        if (state.timer) clearInterval(state.timer);
-        state.timer = null;
+        stopStartupRetry();
+        if (state.backgroundTimer) clearInterval(state.backgroundTimer);
+        state.backgroundTimer = null;
+        state.started = false;
         toast('warning', '安全护栏已停止。');
     }
 
@@ -211,7 +208,6 @@
         state,
         healthCheck,
         patchFloorHider,
-        inspectCurrentChat,
         start,
         stop,
     };

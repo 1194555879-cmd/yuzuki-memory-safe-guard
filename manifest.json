@@ -8,10 +8,8 @@
   "dependencies": [],
   "js": "index.js",
   "author": "Krystal & 顾星野",
-  "version": "0.1.1",
-  "description": "强制禁用柚月记忆的楼层隐藏功能，避免原聊天被写成 is_system=true。",
-  "homePage": "",
-  "homepage": "",
+  "version": "0.1.2",
+  "description": "禁用柚月记忆的楼层隐藏功能；改为低频、事件式检查，减少手机发热与耗电。",
   "auto_update": false,
   "minimum_client_version": "1.18.0"
 }
