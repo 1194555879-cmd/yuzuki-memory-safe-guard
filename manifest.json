@@ -2,14 +2,14 @@
   "manifest_version": 1,
   "id": "yuzuki_memory_safe_guard",
   "display_name": "柚月记忆安全护栏",
-  "loading_order": 999,
+  "loading_order": 9999,
   "requires": [],
   "optional": [],
   "dependencies": [],
   "js": "index.js",
   "author": "Krystal & 顾星野",
-  "version": "0.1.2",
-  "description": "禁用柚月记忆的楼层隐藏功能；改为低频、事件式检查，减少手机发热与耗电。",
+  "version": "0.2.0",
+  "description": "存档级硬锁：阻止普通对话被柚月改成 is_system=true，并拦截明显未完整加载时的总结/追溯。",
   "auto_update": false,
   "minimum_client_version": "1.18.0"
 }
