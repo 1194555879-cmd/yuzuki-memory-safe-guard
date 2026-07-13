@@ -1,0 +1,17 @@
+{
+  "manifest_version": 1,
+  "id": "yuzuki_memory_safe_guard",
+  "display_name": "柚月记忆安全护栏",
+  "loading_order": 999,
+  "requires": [],
+  "optional": [],
+  "dependencies": [],
+  "js": "index.js",
+  "author": "Krystal & 顾星野",
+  "version": "0.1.1",
+  "description": "强制禁用柚月记忆的楼层隐藏功能，避免原聊天被写成 is_system=true。",
+  "homePage": "",
+  "homepage": "",
+  "auto_update": false,
+  "minimum_client_version": "1.18.0"
+}
