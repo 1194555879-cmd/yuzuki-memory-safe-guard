@@ -9,8 +9,9 @@
   "js": "index.js",
   "css": "style.css",
   "author": "Krystal & 顾星野",
-  "version": "0.5.0",
-  "description": "按需全量历史桥、最后一楼边界修复、性能守护与可逆轻量模式。",
-  "auto_update": false,
+  "version": "0.5.1",
+  "description": "按需全量历史桥、最后一楼边界修复、性能守护与可逆轻量模式；修复悬浮球无法点击。",
+  "homePage": "https://github.com/1194555879-cmd/yuzuki-memory-safe-guard",
+  "auto_update": true,
   "minimum_client_version": "1.18.0"
 }
