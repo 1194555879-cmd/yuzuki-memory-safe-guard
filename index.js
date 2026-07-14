@@ -2,8 +2,8 @@
     'use strict';
 
     const MODULE = 'YuzukiMemorySafeGuard';
-    const VERSION = '0.5.0';
-    const PATCHED = Symbol.for('yzm.safe.guard.patched.v050');
+    const VERSION = '0.5.1';
+    const PATCHED = Symbol.for('yzm.safe.guard.patched.v051');
     const SENTINEL_FLAG = '__yzm_safe_boundary_sentinel__';
 
     const state = {
@@ -502,8 +502,8 @@
     }
 
     function installActionAutoBridge() {
-        if (document.__yzmSafeAutoBridgeInstalledV050) return;
-        document.__yzmSafeAutoBridgeInstalledV050 = true;
+        if (document.__yzmSafeAutoBridgeInstalledV051) return;
+        document.__yzmSafeAutoBridgeInstalledV051 = true;
 
         document.addEventListener('click', async (event) => {
             const element = isYuzukiAction(event.target);
