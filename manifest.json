@@ -9,8 +9,8 @@
   "js": "index.js",
   "css": "style.css",
   "author": "Krystal & 顾星野",
-  "version": "0.5.1",
-  "description": "按需全量历史桥、最后一楼边界修复、性能守护与可逆轻量模式；修复悬浮球无法点击。",
+  "version": "0.5.2",
+  "description": "真实楼层常驻显示；打开柚月面板时自动加载完整历史；任务结束或关闭面板后释放；含分页冲突自动重试与隐藏楼层保护。",
   "homePage": "https://github.com/1194555879-cmd/yuzuki-memory-safe-guard",
   "auto_update": true,
   "minimum_client_version": "1.18.0"
