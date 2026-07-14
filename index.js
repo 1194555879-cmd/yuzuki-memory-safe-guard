@@ -2,10 +2,9 @@
     'use strict';
 
     const MODULE = 'YuzukiMemorySafeGuard';
-    const VERSION = '0.4.0';
-    const PATCHED = Symbol.for('yzm.safe.guard.patched.v040');
+    const VERSION = '0.5.0';
+    const PATCHED = Symbol.for('yzm.safe.guard.patched.v050');
     const SENTINEL_FLAG = '__yzm_safe_boundary_sentinel__';
-    const REFRESH_DEBOUNCE_MS = 650;
 
     const state = {
         version: VERSION,
@@ -21,11 +20,33 @@
         loading: false,
         lastError: '',
         currentChatKey: '',
-        refreshTimer: null,
         backgroundTimer: null,
         button: null,
         knownDialogueKeys: new Set(),
         taskReplayGuard: false,
+        taskSeenRunning: false,
+        taskLastActivityAt: 0,
+        bridgeReleaseDeadline: 0,
+        bridgeMonitorTimer: null,
+        perf: {
+            enabled: true,
+            level: 'smooth',
+            candidate: 'smooth',
+            candidateCount: 0,
+            fps: 60,
+            lagMs: 0,
+            longTaskMs: 0,
+            domNodes: 0,
+            iframes: 0,
+            liteMode: false,
+            lastShownLevel: '',
+            banner: null,
+            hideTimer: null,
+            rafFrames: 0,
+            rafLastAt: performance.now(),
+            intervalExpectedAt: performance.now() + 1000,
+            recentLongTasks: [],
+        },
     };
 
     function clone(value) {
@@ -361,9 +382,12 @@
         };
     }
 
-    async function activateBridge({ silent = false, force = false } = {}) {
+    async function activateBridge({ silent = false, force = false, reason = 'manual' } = {}) {
         if (state.loading) return false;
-        if (state.bridgeActive && !force) return true;
+        if (state.bridgeActive && !force) {
+            touchBridgeLease();
+            return true;
+        }
 
         state.loading = true;
         state.lastError = '';
@@ -386,13 +410,15 @@
             state.mode = result.mode;
             state.currentChatKey = result.chatKey;
             state.bridgeActive = true;
+            state.taskSeenRunning = false;
             rememberDialogue(result.messages);
+            touchBridgeLease();
 
             if (!silent) {
                 toast(
                     'success',
-                    `全量历史桥已启用：真实 ${state.realFullCount} 条，已添加 1 条沙盒边界用于覆盖最后一楼。`,
-                    10000,
+                    `临时全量桥已启用：真实 ${state.realFullCount} 条，任务结束后会自动释放。`,
+                    7000,
                 );
             }
 
@@ -409,7 +435,8 @@
         }
     }
 
-    function deactivateBridge({ silent = false } = {}) {
+    function deactivateBridge({ silent = true, reason = 'released' } = {}) {
+        const hadBridge = state.bridgeActive;
         state.bridgeActive = false;
         state.fullMessages = [];
         state.realFullCount = 0;
@@ -418,16 +445,50 @@
         state.windowStartIndex = 0;
         state.currentChatKey = '';
         state.lastError = '';
+        state.taskSeenRunning = false;
+        state.bridgeReleaseDeadline = 0;
         updateButton();
-        if (!silent) toast('info', '全量历史桥已关闭。');
+        if (hadBridge && !silent) toast('info', `临时全量桥已释放（${reason}）。`, 3500);
     }
 
-    function scheduleBridgeRefresh(reason = '聊天变更') {
-        if (state.refreshTimer) clearTimeout(state.refreshTimer);
-        state.refreshTimer = setTimeout(async () => {
-            console.info(`[${MODULE}] ${reason}，刷新全量历史桥。`);
-            await activateBridge({ silent: true, force: true });
-        }, REFRESH_DEBOUNCE_MS);
+    function touchBridgeLease(ms = 120000) {
+        state.taskLastActivityAt = Date.now();
+        state.bridgeReleaseDeadline = Date.now() + ms;
+    }
+
+    function visibleButtonTexts() {
+        return Array.from(document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'))
+            .filter((el) => {
+                const rect = el.getBoundingClientRect?.();
+                return rect && rect.width > 0 && rect.height > 0;
+            })
+            .map((el) => String(el.textContent || el.value || '').replace(/\s+/g, ''));
+    }
+
+    function isYuzukiTaskRunning() {
+        return visibleButtonTexts().some((text) =>
+            /(停止任务|取消任务|正在执行|处理中|执行中|正在总结|正在追溯)/.test(text)
+        );
+    }
+
+    function startBridgeMonitor() {
+        if (state.bridgeMonitorTimer) return;
+        state.bridgeMonitorTimer = setInterval(() => {
+            if (!state.bridgeActive) return;
+            if (isYuzukiTaskRunning()) {
+                state.taskSeenRunning = true;
+                touchBridgeLease(120000);
+                return;
+            }
+            const now = Date.now();
+            if (state.taskSeenRunning && now - state.taskLastActivityAt > 5000) {
+                deactivateBridge({ silent: true, reason: 'task-finished' });
+                return;
+            }
+            if (state.bridgeReleaseDeadline && now > state.bridgeReleaseDeadline) {
+                deactivateBridge({ silent: true, reason: 'lease-timeout' });
+            }
+        }, 1800);
     }
 
     function isYuzukiAction(target) {
@@ -441,32 +502,40 @@
     }
 
     function installActionAutoBridge() {
-        if (document.__yzmSafeAutoBridgeInstalled) return;
-        document.__yzmSafeAutoBridgeInstalled = true;
+        if (document.__yzmSafeAutoBridgeInstalledV050) return;
+        document.__yzmSafeAutoBridgeInstalledV050 = true;
 
         document.addEventListener('click', async (event) => {
             const element = isYuzukiAction(event.target);
             if (!element) return;
-            if (state.taskReplayGuard) return;
-
-            if (state.bridgeActive) return;
+            if (state.taskReplayGuard) {
+                touchBridgeLease();
+                return;
+            }
+            if (state.bridgeActive) {
+                touchBridgeLease();
+                return;
+            }
 
             event.preventDefault();
             event.stopImmediatePropagation();
+            showPerformanceBanner('task', '🧠 正在准备完整历史', '准备好后会自动继续刚才的操作。', 0);
 
-            const ok = await activateBridge({ silent: false, force: true });
+            const ok = await activateBridge({ silent: true, force: true, reason: 'yuzuki-action' });
             if (!ok) {
+                hidePerformanceBanner();
                 const message = '完整历史桥未就绪，本次总结/追溯已取消，避免漏掉前文。';
                 toast('error', message, 12000);
                 try { globalThis.alert?.(message); } catch {}
                 return;
             }
 
+            showPerformanceBanner('task', '🧠 完整历史已就绪', '正在继续执行柚月任务，请暂时不要连续点击。', 3500);
             state.taskReplayGuard = true;
             try {
-                // 让柚月在同一面板内重新读取桥接后的 context.chat。
-                await new Promise((resolve) => setTimeout(resolve, 120));
+                await new Promise((resolve) => setTimeout(resolve, 140));
                 element.click();
+                touchBridgeLease();
             } finally {
                 setTimeout(() => { state.taskReplayGuard = false; }, 0);
             }
@@ -507,17 +576,160 @@
         const button = document.createElement('button');
         button.id = 'yzm-safe-full-history-button';
         button.type = 'button';
-        button.addEventListener('click', () => {
-            if (state.bridgeActive) {
-                activateBridge({ silent: false, force: true });
-            } else {
-                activateBridge({ silent: false, force: true });
-            }
-        });
+        button.addEventListener('click', () => activateBridge({
+            silent: false,
+            force: true,
+            reason: 'manual-retry',
+        }));
 
         document.body.appendChild(button);
         state.button = button;
         updateButton();
+    }
+
+    function ensurePerformanceBanner() {
+        if (state.perf.banner?.isConnected) return;
+        const banner = document.createElement('div');
+        banner.id = 'yzm-performance-banner';
+        banner.dataset.visible = 'false';
+        banner.innerHTML = '<span class="yzm-perf-title"></span><span class="yzm-perf-detail"></span>';
+        banner.addEventListener('click', () => {
+            const p = state.perf;
+            banner.querySelector('.yzm-perf-title').textContent = '📊 当前性能状态';
+            banner.querySelector('.yzm-perf-detail').textContent =
+                `FPS≈${Math.round(p.fps)}｜延迟≈${Math.round(p.lagMs)}ms｜DOM ${p.domNodes}｜iframe ${p.iframes}`;
+        });
+        document.body.appendChild(banner);
+        state.perf.banner = banner;
+    }
+
+    function showPerformanceBanner(level, title, detail, duration = 4500) {
+        ensurePerformanceBanner();
+        const banner = state.perf.banner;
+        if (!banner) return;
+        if (state.perf.hideTimer) clearTimeout(state.perf.hideTimer);
+        banner.querySelector('.yzm-perf-title').textContent = title;
+        banner.querySelector('.yzm-perf-detail').textContent = detail || '';
+        banner.dataset.level = level;
+        banner.dataset.visible = 'true';
+        if (duration > 0) {
+            state.perf.hideTimer = setTimeout(() => { banner.dataset.visible = 'false'; }, duration);
+        }
+    }
+
+    function hidePerformanceBanner() {
+        if (state.perf.hideTimer) clearTimeout(state.perf.hideTimer);
+        if (state.perf.banner) state.perf.banner.dataset.visible = 'false';
+    }
+
+    function setLiteMode(enabled, reason = '') {
+        const p = state.perf;
+        if (p.liteMode === enabled) return;
+        p.liteMode = enabled;
+        document.body.classList.toggle('yzm-performance-lite', enabled);
+        if (enabled) {
+            showPerformanceBanner(
+                'severe',
+                '🐢 卡顿较明显，已启用轻量模式',
+                reason || '已暂时关闭高开销动画、模糊和阴影；聊天数据不会被修改。',
+                0,
+            );
+        } else {
+            showPerformanceBanner(
+                'recovered',
+                '✅ 页面已恢复，可以继续操作',
+                '轻量模式已自动关闭，原来的视觉效果已经恢复。',
+                4200,
+            );
+        }
+    }
+
+    function classifyPerformance() {
+        const p = state.perf;
+        if (p.lagMs > 700 || p.fps < 18 || p.longTaskMs > 900) return 'severe';
+        if (p.lagMs > 250 || p.fps < 35 || p.longTaskMs > 300 || p.domNodes > 12000) return 'slow';
+        return 'smooth';
+    }
+
+    function commitPerformanceLevel(level) {
+        const p = state.perf;
+        if (p.level === level) return;
+        const previous = p.level;
+        p.level = level;
+        if (level === 'slow') {
+            showPerformanceBanner(
+                'slow',
+                '⚠️ 当前有点卡，正在观察',
+                `FPS≈${Math.round(p.fps)}，操作延迟≈${Math.round(p.lagMs)}ms。先别连续点按钮。`,
+                4800,
+            );
+        } else if (level === 'severe') {
+            setLiteMode(true, `FPS≈${Math.round(p.fps)}，操作延迟≈${Math.round(p.lagMs)}ms。`);
+        } else if (level === 'smooth') {
+            if (p.liteMode) setLiteMode(false);
+            else if (previous !== 'smooth') {
+                showPerformanceBanner('recovered', '✅ 页面已经顺畅了', '现在可以继续操作。', 3200);
+            }
+        }
+        p.lastShownLevel = level;
+    }
+
+    function evaluatePerformance() {
+        if (document.visibilityState !== 'visible' || !state.perf.enabled) return;
+        const p = state.perf;
+        const now = performance.now();
+        p.recentLongTasks = p.recentLongTasks.filter((x) => now - x.at <= 10000);
+        p.longTaskMs = p.recentLongTasks.reduce((sum, x) => sum + x.duration, 0);
+        const candidate = classifyPerformance();
+        if (candidate === p.candidate) p.candidateCount += 1;
+        else {
+            p.candidate = candidate;
+            p.candidateCount = 1;
+        }
+        const threshold = candidate === 'severe' ? 2 : candidate === 'slow' ? 3 : 5;
+        if (p.candidateCount >= threshold) commitPerformanceLevel(candidate);
+    }
+
+    function startPerformanceGuardian() {
+        ensurePerformanceBanner();
+        if ('PerformanceObserver' in globalThis) {
+            try {
+                const observer = new PerformanceObserver((list) => {
+                    const at = performance.now();
+                    for (const entry of list.getEntries()) {
+                        state.perf.recentLongTasks.push({ at, duration: Number(entry.duration || 0) });
+                    }
+                });
+                observer.observe({ entryTypes: ['longtask'] });
+            } catch {}
+        }
+
+        const rafLoop = (now) => {
+            const p = state.perf;
+            p.rafFrames += 1;
+            const elapsed = now - p.rafLastAt;
+            if (elapsed >= 2000) {
+                p.fps = Math.max(0, Math.min(60, (p.rafFrames * 1000) / elapsed));
+                p.rafFrames = 0;
+                p.rafLastAt = now;
+            }
+            requestAnimationFrame(rafLoop);
+        };
+        requestAnimationFrame(rafLoop);
+
+        setInterval(() => {
+            const p = state.perf;
+            const now = performance.now();
+            p.lagMs = Math.max(0, now - p.intervalExpectedAt);
+            p.intervalExpectedAt = now + 1000;
+        }, 1000);
+
+        setInterval(() => {
+            if (document.visibilityState !== 'visible') return;
+            state.perf.domNodes = document.getElementsByTagName('*').length;
+            state.perf.iframes = document.getElementsByTagName('iframe').length;
+            evaluatePerformance();
+        }, 2500);
     }
 
     function installEventHooks() {
@@ -526,7 +738,7 @@
         const eventTypes = context?.event_types || globalThis.event_types || {};
         if (!eventSource?.on) return;
 
-        const refreshEvents = [
+        const eventNames = [
             'CHAT_CHANGED',
             'MESSAGE_SENT',
             'MESSAGE_RECEIVED',
@@ -535,23 +747,21 @@
             'GENERATION_ENDED',
         ];
 
-        for (const name of refreshEvents) {
+        for (const name of eventNames) {
             const eventName = eventTypes[name];
             if (!eventName) continue;
-
-            const marker = `__yzmSafeGuardV040_${name}`;
+            const marker = `__yzmSafeGuardV050_${name}`;
             if (eventSource[marker]) continue;
-
             try {
                 eventSource.on(eventName, () => {
                     sanitizeRealChat(`事件 ${name}`);
                     patchFloorHider();
                     patchSaveHooks();
-
                     if (name === 'CHAT_CHANGED') {
-                        deactivateBridge({ silent: true });
+                        deactivateBridge({ silent: true, reason: 'chat-changed' });
+                    } else if (!isYuzukiTaskRunning()) {
+                        deactivateBridge({ silent: true, reason: 'normal-chat' });
                     }
-                    scheduleBridgeRefresh(name);
                 });
                 eventSource[marker] = true;
             } catch {}
@@ -564,6 +774,7 @@
         patchSaveHooks();
         sanitizeRealChat('健康检查');
         ensureButton();
+        ensurePerformanceBanner();
         installActionAutoBridge();
         installEventHooks();
     }
@@ -574,17 +785,19 @@
 
         patchGetContext();
         ensureButton();
+        ensurePerformanceBanner();
         installActionAutoBridge();
+        startBridgeMonitor();
+        startPerformanceGuardian();
 
-        const boot = setInterval(async () => {
+        const boot = setInterval(() => {
             healthCheck();
             if (globalThis.YuzukiMemory && rawContext()) {
                 clearInterval(boot);
-                await activateBridge({ silent: true, force: true });
                 toast(
                     'success',
-                    `v${VERSION} 已启用：自动全量桥、最后一楼边界与隔离沙盒已就绪。`,
-                    9000,
+                    `v${VERSION} 已启用：全量桥改为按需加载，性能守护正在后台观察。`,
+                    8500,
                 );
             }
         }, 500);
@@ -595,16 +808,9 @@
             if (document.visibilityState === 'visible') healthCheck();
         }, 60000);
 
-        globalThis.addEventListener('focus', () => {
-            healthCheck();
-            scheduleBridgeRefresh('回到前台');
-        }, { passive: true });
-
+        globalThis.addEventListener('focus', () => healthCheck(), { passive: true });
         document.addEventListener('visibilitychange', () => {
-            if (document.visibilityState === 'visible') {
-                healthCheck();
-                scheduleBridgeRefresh('页面重新可见');
-            }
+            if (document.visibilityState === 'visible') healthCheck();
         }, { passive: true });
     }
 
@@ -614,6 +820,26 @@
         deactivateBridge,
         sanitizeRealChat,
         healthCheck,
+        performance: {
+            get snapshot() {
+                return {
+                    level: state.perf.level,
+                    fps: state.perf.fps,
+                    lagMs: state.perf.lagMs,
+                    longTaskMs: state.perf.longTaskMs,
+                    domNodes: state.perf.domNodes,
+                    iframes: state.perf.iframes,
+                    liteMode: state.perf.liteMode,
+                };
+            },
+            setLiteMode,
+            show: () => showPerformanceBanner(
+                'task',
+                '📊 当前性能状态',
+                `FPS≈${Math.round(state.perf.fps)}｜延迟≈${Math.round(state.perf.lagMs)}ms｜DOM ${state.perf.domNodes}`,
+                6000,
+            ),
+        },
     };
 
     if (document.readyState === 'loading') {

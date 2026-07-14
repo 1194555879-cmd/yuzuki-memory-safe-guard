@@ -26,7 +26,8 @@
     opacity: .8;
     pointer-events: none;
 }
-#yzm-safe-full-history-button[data-state="active"] {
+#yzm-safe-full-history-button[data-state="active"],
+#yzm-safe-full-history-button[data-state="idle"] {
     opacity: 0;
     pointer-events: none;
     transform: translateY(8px) scale(.9);
@@ -43,4 +44,59 @@
         left: 16px;
         bottom: 16px;
     }
+}
+
+
+#yzm-performance-banner {
+    position: fixed;
+    top: calc(10px + env(safe-area-inset-top));
+    left: 50%;
+    transform: translateX(-50%) translateY(-8px);
+    z-index: 2147483001;
+    width: min(88vw, 420px);
+    padding: 9px 12px;
+    border: 1px solid color-mix(in srgb, currentColor 28%, transparent);
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #202020) 95%, transparent);
+    color: var(--SmartThemeBodyColor, #fff);
+    box-shadow: 0 5px 20px rgba(0,0,0,.24);
+    font: inherit;
+    font-size: 12px;
+    line-height: 1.35;
+    text-align: center;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .2s ease, transform .2s ease;
+}
+#yzm-performance-banner[data-visible="true"] {
+    opacity: .96;
+    transform: translateX(-50%) translateY(0);
+    pointer-events: auto;
+}
+#yzm-performance-banner .yzm-perf-title { font-weight: 700; }
+#yzm-performance-banner .yzm-perf-detail {
+    display: block;
+    margin-top: 2px;
+    opacity: .78;
+    font-size: 11px;
+}
+#yzm-performance-banner[data-level="severe"] { border-color: #d8875e; }
+#yzm-performance-banner[data-level="recovered"] { border-color: #68a879; }
+
+body.yzm-performance-lite *,
+body.yzm-performance-lite *::before,
+body.yzm-performance-lite *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+}
+body.yzm-performance-lite .mes,
+body.yzm-performance-lite .drawer,
+body.yzm-performance-lite .popup,
+body.yzm-performance-lite dialog,
+body.yzm-performance-lite details {
+    box-shadow: none !important;
 }
