@@ -7,9 +7,10 @@
   "optional": [],
   "dependencies": [],
   "js": "index.js",
+  "css": "style.css",
   "author": "Krystal & 顾星野",
-  "version": "0.2.0",
-  "description": "存档级硬锁：阻止普通对话被柚月改成 is_system=true，并拦截明显未完整加载时的总结/追溯。",
+  "version": "0.3.0",
+  "description": "全量历史桥＋隔离沙盒：TauriTavern 手机端可读取完整历史，同时不让柚月修改原聊天。",
   "auto_update": false,
   "minimum_client_version": "1.18.0"
 }

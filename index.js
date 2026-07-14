@@ -2,48 +2,41 @@
     'use strict';
 
     const MODULE = 'YuzukiMemorySafeGuard';
-    const VERSION = '0.2.0';
-    const PATCHED = Symbol.for('yzm.safe.guard.patched');
-    const GUARDED = Symbol.for('yzm.safe.guard.message');
-    const STARTUP_INTERVAL = 400;
-    const STARTUP_LIMIT = 75;       // 最多等待柚月 / 酒馆 30 秒
-    const BACKGROUND_INTERVAL = 60000;
-
-    const SETTINGS_KEYS = {
-        plugin: 'yzm_memory_global_plugin_settings',
-        autoSummary: 'yzm_memory_global_auto_summary_settings',
-    };
+    const VERSION = '0.3.0';
+    const PATCHED = Symbol.for('yzm.safe.guard.patched.v030');
+    const BRIDGE_TTL_MS = 30 * 60 * 1000;
 
     const state = {
         version: VERSION,
         started: false,
-        startupTimer: null,
+        originalGetContext: null,
+        bridgeActive: false,
+        bridgeExpiresAt: 0,
+        fullMessages: [],
+        fullCount: 0,
+        loadedCount: 0,
+        windowStartIndex: 0,
+        mode: 'unknown',
+        loading: false,
+        lastError: '',
+        knownDialogueKeys: new Set(),
+        button: null,
         backgroundTimer: null,
-        startupAttempts: 0,
-        floorHiderPatched: false,
-        saveHooksPatched: 0,
-        messageGuardsInstalled: 0,
-        blockedAssignments: 0,
-        restoredBeforeSave: 0,
-        blockedIncompleteTasks: 0,
-        lastHealthAt: null,
     };
 
-    const knownSafeDialogueKeys = new Set();
-
-    function getContext() {
+    function clone(value) {
         try {
-            return globalThis.SillyTavern?.getContext?.() ?? null;
+            return globalThis.structuredClone(value);
         } catch {
-            return null;
+            return JSON.parse(JSON.stringify(value));
         }
     }
 
-    function toast(type, message, options = {}) {
+    function toast(type, message, timeOut = 7000) {
         try {
             if (globalThis.toastr?.[type]) {
                 globalThis.toastr[type](message, '柚月记忆安全护栏', {
-                    timeOut: options.timeOut ?? 6000,
+                    timeOut,
                     preventDuplicates: true,
                 });
                 return;
@@ -52,471 +45,449 @@
         console.log(`[${MODULE}] ${message}`);
     }
 
-    function markPatched(fn) {
+    function rawContext() {
         try {
-            Object.defineProperty(fn, PATCHED, {
-                value: true,
-                configurable: false,
-                enumerable: false,
-                writable: false,
-            });
-        } catch {}
-        return fn;
+            if (typeof state.originalGetContext === 'function') {
+                return state.originalGetContext.call(globalThis.SillyTavern);
+            }
+            return globalThis.SillyTavern?.getContext?.() ?? null;
+        } catch {
+            return null;
+        }
     }
 
-    function isPluginOrSystemMessage(message) {
-        if (!message || typeof message !== 'object') return true;
-        const role = String(message.role || '').toLowerCase();
-        if (role === 'system') return true;
-        return Boolean(
+    function isDialogueMessage(message) {
+        if (!message || typeof message !== 'object') return false;
+        if (String(message.role || '').toLowerCase() === 'system') return false;
+        if (
             message.isGaigaiPrompt
             || message.isGaigaiData
             || message.isGaigaiVector
             || message.isYuzukiVector
             || message.yzmMemoryInternal
-            || message.isPhoneMessage
-        );
-    }
-
-    function isDialogueMessage(message) {
-        if (!message || typeof message !== 'object') return false;
-        if (isPluginOrSystemMessage(message)) return false;
+        ) return false;
         if (message.is_user === true || message.is_user === false) return true;
         const role = String(message.role || '').toLowerCase();
         return role === 'user' || role === 'assistant';
     }
 
-    function messageKey(message) {
+    function dialogueKey(message) {
         if (!isDialogueMessage(message)) return '';
-        const who = message.is_user === true || String(message.role || '').toLowerCase() === 'user'
-            ? 'u'
-            : 'a';
-        const date = String(message.send_date ?? message.sendDate ?? message.created_at ?? '');
-        const name = String(message.name ?? '');
-        const text = String(message.mes ?? message.content ?? '');
-        return `${who}\u241f${date}\u241f${name}\u241f${text}`;
+        const role = message.is_user === true || String(message.role || '').toLowerCase() === 'user'
+            ? 'user'
+            : 'assistant';
+        return [
+            role,
+            String(message.send_date ?? message.sendDate ?? message.created_at ?? ''),
+            String(message.name ?? ''),
+            String(message.mes ?? message.content ?? ''),
+        ].join('\u241f');
     }
 
-    function rememberSafeDialogue(message) {
-        if (!isDialogueMessage(message)) return;
-        if (message.is_system !== true) {
-            const key = messageKey(message);
-            if (key) knownSafeDialogueKeys.add(key);
+    function rememberDialogue(messages) {
+        if (!Array.isArray(messages)) return;
+        for (const message of messages) {
+            if (isDialogueMessage(message) && message.is_system !== true) {
+                const key = dialogueKey(message);
+                if (key) state.knownDialogueKeys.add(key);
+            }
         }
     }
 
-    function shouldRestoreHidden(message) {
-        if (!isDialogueMessage(message) || message.is_system !== true) return false;
-        if (message.is_yzm_hidden_floor === true) return true;
-        const key = messageKey(message);
-        return Boolean(key && knownSafeDialogueKeys.has(key));
-    }
-
-    function updateDomVisibility(index, visible) {
-        try {
-            const selector = `#chat .mes[mesid="${index}"], #chat .mes[data-mesid="${index}"]`;
-            document.querySelectorAll(selector).forEach((node) => {
-                if (visible) {
-                    node.setAttribute('is_system', 'false');
-                    node.removeAttribute('is_yzm_hidden_floor');
-                }
-            });
-        } catch {}
-    }
-
-    function sanitizeChat(reason = 'manual') {
-        const chat = getContext()?.chat;
+    function sanitizeRealChat(reason = '检查') {
+        const context = rawContext();
+        const chat = context?.chat;
         if (!Array.isArray(chat)) return 0;
 
         let restored = 0;
-        chat.forEach((message, index) => {
-            if (!message || typeof message !== 'object') return;
-
-            if (shouldRestoreHidden(message)) {
-                try {
-                    message.is_system = false;
-                } catch {}
-                try {
-                    delete message.is_yzm_hidden_floor;
-                } catch {}
-                updateDomVisibility(index, true);
-                restored += 1;
+        for (const message of chat) {
+            if (!isDialogueMessage(message) || message.is_system !== true) {
+                if (isDialogueMessage(message)) rememberDialogue([message]);
+                continue;
             }
 
-            rememberSafeDialogue(message);
-            installMessageGuard(message);
-        });
+            const key = dialogueKey(message);
+            const shouldRestore = message.is_yzm_hidden_floor === true
+                || (key && state.knownDialogueKeys.has(key));
+
+            if (!shouldRestore) continue;
+
+            message.is_system = false;
+            try { delete message.is_yzm_hidden_floor; } catch {}
+            restored += 1;
+            rememberDialogue([message]);
+        }
 
         if (restored > 0) {
-            state.restoredBeforeSave += restored;
-            console.error(`[${MODULE}] ${reason}：恢复 ${restored} 条被错误隐藏的普通对话。`);
-            toast('warning', `已拦截并恢复 ${restored} 条被隐藏的原聊天。`, { timeOut: 8000 });
+            toast('warning', `${reason}：已恢复 ${restored} 条被错误隐藏的原聊天。`, 9000);
+            console.error(`[${MODULE}] ${reason}: restored ${restored} messages`);
         }
         return restored;
     }
 
-    function installMessageGuard(message) {
-        if (!isDialogueMessage(message) || message[GUARDED]) return false;
+    function bridgeExpired() {
+        return state.bridgeActive && Date.now() >= state.bridgeExpiresAt;
+    }
 
-        // 对于安装护栏时已经是 true 的旧坏档，不贸然自动判定；
-        // 只有带柚月标签，或之前曾以正常状态见过的消息，才会被 sanitizeChat 恢复。
-        let backingValue = message.is_system === true;
-        const originalDescriptor = Object.getOwnPropertyDescriptor(message, 'is_system');
-        if (originalDescriptor && originalDescriptor.configurable === false) {
-            rememberSafeDialogue(message);
-            return false;
-        }
+    function deactivateBridge(silent = false) {
+        state.bridgeActive = false;
+        state.bridgeExpiresAt = 0;
+        state.fullMessages = [];
+        state.fullCount = 0;
+        state.lastError = '';
+        updateButton();
+        if (!silent) toast('info', '全量历史桥已关闭。重新打开时可再次加载。');
+    }
+
+    function makeBridgeContext(context) {
+        const safeChat = state.fullMessages;
+        return new Proxy(context, {
+            get(target, prop, receiver) {
+                if (prop === 'chat') return safeChat;
+                if (prop === 'saveChat' || prop === 'saveChatConditional') {
+                    const fn = Reflect.get(target, prop, receiver);
+                    if (typeof fn !== 'function') return fn;
+                    return async (...args) => {
+                        sanitizeRealChat(`保存前 ${String(prop)}`);
+                        return await fn.apply(target, args);
+                    };
+                }
+                return Reflect.get(target, prop, receiver);
+            },
+            set(target, prop, value, receiver) {
+                if (prop === 'chat') {
+                    console.warn(`[${MODULE}] 已阻止扩展替换原聊天数组。`);
+                    return true;
+                }
+                return Reflect.set(target, prop, value, receiver);
+            },
+        });
+    }
+
+    function patchGetContext() {
+        const st = globalThis.SillyTavern;
+        if (!st || typeof st.getContext !== 'function') return false;
+        if (st.getContext[PATCHED]) return true;
+
+        state.originalGetContext = st.getContext.bind(st);
+        const wrapped = function guardedGetContext() {
+            const context = state.originalGetContext();
+            if (bridgeExpired()) deactivateBridge(true);
+            if (!state.bridgeActive || !context) return context;
+            return makeBridgeContext(context);
+        };
 
         try {
-            Object.defineProperty(message, 'is_system', {
-                configurable: true,
-                enumerable: true,
-                get() {
-                    return backingValue;
-                },
-                set(nextValue) {
-                    const wantsHidden = nextValue === true;
-                    if (wantsHidden && isDialogueMessage(message)) {
-                        state.blockedAssignments += 1;
-                        backingValue = false;
-                        try {
-                            delete message.is_yzm_hidden_floor;
-                        } catch {}
-                        console.warn(`[${MODULE}] 已阻止普通对话被写成 is_system=true。`, {
-                            blockedAssignments: state.blockedAssignments,
-                        });
-                        return;
-                    }
-                    backingValue = Boolean(nextValue);
-                },
-            });
-            Object.defineProperty(message, GUARDED, {
-                value: true,
-                configurable: true,
-                enumerable: false,
-                writable: false,
-            });
-            state.messageGuardsInstalled += 1;
-            rememberSafeDialogue(message);
-            return true;
-        } catch (error) {
-            console.warn(`[${MODULE}] 无法为消息安装属性护栏。`, error);
-            return false;
-        }
-    }
-
-    function forceSafeSettings() {
-        const pairs = [
-            [SETTINGS_KEYS.plugin, 'hideFloorsEnabled'],
-            [SETTINGS_KEYS.autoSummary, 'hideSummaryFloors'],
-        ];
-        const yzm = globalThis.YuzukiMemory;
-
-        for (const [key, field] of pairs) {
-            try {
-                let settings = yzm?.GlobalSettings?.get?.(key, {}) ?? {};
-                if (!settings || typeof settings !== 'object' || Array.isArray(settings)) settings = {};
-                if (settings[field] !== false) {
-                    settings[field] = false;
-                    yzm?.GlobalSettings?.set?.(key, settings);
-                }
-            } catch (error) {
-                console.warn(`[${MODULE}] 无法写入柚月安全设置 ${key}.${field}`, error);
-            }
-
-            try {
-                const raw = localStorage.getItem(key);
-                const local = raw ? JSON.parse(raw) : {};
-                if (local && typeof local === 'object' && !Array.isArray(local) && local[field] !== false) {
-                    local[field] = false;
-                    localStorage.setItem(key, JSON.stringify(local));
-                }
-            } catch {}
-        }
-    }
-
-    function blockedFloorResult(reason) {
-        console.warn(`[${MODULE}] 已阻止柚月楼层隐藏调用。`, { reason });
-        sanitizeChat(`拦截 ${reason}`);
-        return Promise.resolve({
-            success: false,
-            skipped: true,
-            reason,
-            safeGuard: true,
-        });
+            Object.defineProperty(wrapped, PATCHED, { value: true });
+        } catch {}
+        st.getContext = wrapped;
+        return true;
     }
 
     function patchFloorHider() {
         const floorHider = globalThis.YuzukiMemory?.FloorHider;
         if (!floorHider || typeof floorHider !== 'object') return false;
 
-        const replacements = {
-            loadSettings: () => {
-                const original = floorHider.loadSettings;
-                return markPatched(function safeLoadSettings(...args) {
-                    let value = {};
-                    try {
-                        value = original?.[PATCHED] ? {} : original?.apply(this, args) ?? {};
-                    } catch {}
-                    return { ...value, hideFloorsEnabled: false };
-                });
-            },
-            loadAutoSummarySettings: () => {
-                const original = floorHider.loadAutoSummarySettings;
-                return markPatched(function safeLoadAutoSummarySettings(...args) {
-                    let value = {};
-                    try {
-                        value = original?.[PATCHED] ? {} : original?.apply(this, args) ?? {};
-                    } catch {}
-                    return { ...value, hideSummaryFloors: false };
-                });
-            },
-            collectIndicesToHide: () => markPatched(() => []),
-            collectSummaryIndicesToHide: () => markPatched(() => []),
-            applyContextLimitHiding: () => markPatched(() => blockedFloorResult('context_floor_hiding_disabled')),
-            applySummaryPointerHiding: () => markPatched(() => blockedFloorResult('summary_floor_hiding_disabled')),
-            applyConfiguredHiding: () => markPatched(() => blockedFloorResult('all_floor_hiding_disabled')),
+        const block = (reason) => async () => {
+            sanitizeRealChat(`拦截 ${reason}`);
+            return { success: false, skipped: true, reason, safeGuard: true };
         };
 
-        let changed = false;
-        for (const [name, factory] of Object.entries(replacements)) {
-            const current = floorHider[name];
-            if (typeof current === 'function' && current[PATCHED]) continue;
+        const replacements = {
+            collectIndicesToHide: () => [],
+            collectSummaryIndicesToHide: () => [],
+            applyContextLimitHiding: block('context_floor_hiding_disabled'),
+            applySummaryPointerHiding: block('summary_floor_hiding_disabled'),
+            applyConfiguredHiding: block('all_floor_hiding_disabled'),
+        };
+
+        for (const [name, replacement] of Object.entries(replacements)) {
             try {
-                floorHider[name] = factory();
-                changed = true;
+                if (floorHider[name]?.[PATCHED]) continue;
+                Object.defineProperty(replacement, PATCHED, { value: true });
+                floorHider[name] = replacement;
             } catch (error) {
-                console.error(`[${MODULE}] 覆盖 FloorHider.${name} 失败`, error);
+                console.warn(`[${MODULE}] 无法覆盖 FloorHider.${name}`, error);
             }
         }
-
-        if (changed) console.info(`[${MODULE}] 已锁死 FloorHider。`);
-        state.floorHiderPatched = true;
         return true;
     }
 
-    function wrapSaveFunction(owner, name) {
-        if (!owner || typeof owner[name] !== 'function') return false;
-        const current = owner[name];
-        if (current[PATCHED]) return true;
+    function patchSaveHooks() {
+        const targets = [
+            [globalThis, 'saveChat'],
+            [globalThis, 'saveChatConditional'],
+        ];
 
-        const wrapped = markPatched(async function guardedSave(...args) {
-            sanitizeChat(`保存前 ${name}`);
-            return await current.apply(this, args);
-        });
+        const context = rawContext();
+        if (context) {
+            targets.push([context, 'saveChat'], [context, 'saveChatConditional']);
+        }
+
+        for (const [owner, name] of targets) {
+            if (!owner || typeof owner[name] !== 'function') continue;
+            const current = owner[name];
+            if (current[PATCHED]) continue;
+
+            const wrapped = async function guardedSave(...args) {
+                sanitizeRealChat(`保存前 ${name}`);
+                return await current.apply(this, args);
+            };
+            try {
+                Object.defineProperty(wrapped, PATCHED, { value: true });
+                owner[name] = wrapped;
+            } catch {}
+        }
+    }
+
+    async function waitForTauriHost() {
+        const host = globalThis.__TAURITAVERN__;
+        if (!host) return null;
+        try {
+            await (host.ready ?? globalThis.__TAURITAVERN_MAIN_READY__);
+        } catch {}
+        return globalThis.__TAURITAVERN__?.api?.chat ?? null;
+    }
+
+    async function readFullTauriHistory() {
+        const api = await waitForTauriHost();
+        if (!api?.current?.handle || !api?.current?.windowInfo) {
+            throw new Error('未检测到 TauriTavern 完整历史 API。');
+        }
+
+        const info = await api.current.windowInfo();
+        const handle = api.current.handle();
+        if (!handle?.history?.tail || !handle?.history?.before) {
+            throw new Error('当前 TauriTavern 版本没有 history API。');
+        }
+
+        const totalCount = Number(info?.totalCount || 0);
+        const limit = Math.min(200, Math.max(50, totalCount || 100));
+        let page = await handle.history.tail({ limit });
+        const pages = [page];
+
+        while (page?.hasMoreBefore) {
+            page = await handle.history.before(page, { limit });
+            pages.unshift(page);
+            if (pages.length > 1000) throw new Error('历史分页数量异常，已停止。');
+        }
+
+        const indexed = [];
+        for (const item of pages) {
+            const start = Number(item?.startIndex || 0);
+            const messages = Array.isArray(item?.messages) ? item.messages : [];
+            messages.forEach((message, offset) => {
+                indexed.push({ index: start + offset, message });
+            });
+        }
+
+        indexed.sort((a, b) => a.index - b.index);
+        const seen = new Set();
+        const full = [];
+        for (const entry of indexed) {
+            if (seen.has(entry.index)) continue;
+            seen.add(entry.index);
+            full.push(clone(entry.message));
+        }
+
+        if (totalCount > 0 && full.length !== totalCount) {
+            throw new Error(`完整历史读取不一致：应有 ${totalCount} 条，实际取得 ${full.length} 条。`);
+        }
+
+        return {
+            messages: full,
+            totalCount: totalCount || full.length,
+            loadedCount: Number(info?.windowLength || rawContext()?.chat?.length || 0),
+            windowStartIndex: Number(info?.windowStartIndex || 0),
+            mode: String(info?.mode || 'windowed'),
+        };
+    }
+
+    async function readDesktopHistory() {
+        const chat = rawContext()?.chat;
+        if (!Array.isArray(chat)) throw new Error('当前没有打开聊天。');
+        return {
+            messages: clone(chat),
+            totalCount: chat.length,
+            loadedCount: chat.length,
+            windowStartIndex: 0,
+            mode: 'off',
+        };
+    }
+
+    async function activateBridge() {
+        if (state.loading) return;
+        state.loading = true;
+        state.lastError = '';
+        updateButton();
 
         try {
-            owner[name] = wrapped;
-            state.saveHooksPatched += 1;
-            return true;
+            sanitizeRealChat('启用全量桥前');
+            const result = globalThis.__TAURITAVERN__
+                ? await readFullTauriHistory()
+                : await readDesktopHistory();
+
+            result.messages.forEach((message) => {
+                if (isDialogueMessage(message)) {
+                    message.is_system = false;
+                    try { delete message.is_yzm_hidden_floor; } catch {}
+                }
+            });
+
+            state.fullMessages = result.messages;
+            state.fullCount = result.totalCount;
+            state.loadedCount = result.loadedCount;
+            state.windowStartIndex = result.windowStartIndex;
+            state.mode = result.mode;
+            state.bridgeActive = true;
+            state.bridgeExpiresAt = Date.now() + BRIDGE_TTL_MS;
+            rememberDialogue(result.messages);
+
+            toast(
+                'success',
+                `全量历史桥已启用：柚月将读取 ${state.fullCount} 条；页面仍只渲染 ${state.loadedCount} 条。请关闭并重新打开柚月面板。`,
+                12000,
+            );
         } catch (error) {
-            console.warn(`[${MODULE}] 无法包装保存函数 ${name}`, error);
-            return false;
+            state.bridgeActive = false;
+            state.lastError = String(error?.message || error || '加载失败');
+            console.error(`[${MODULE}] 全量历史桥加载失败`, error);
+            toast('error', `全量历史桥加载失败：${state.lastError}`, 12000);
+        } finally {
+            state.loading = false;
+            updateButton();
         }
     }
 
-    function patchSaveHooks() {
-        wrapSaveFunction(globalThis, 'saveChatConditional');
-        wrapSaveFunction(globalThis, 'saveChat');
+    async function refreshWindowInfo() {
+        try {
+            if (globalThis.__TAURITAVERN__?.api?.chat?.current?.windowInfo) {
+                const info = await globalThis.__TAURITAVERN__.api.chat.current.windowInfo();
+                state.fullCount = Number(info?.totalCount || state.fullCount || 0);
+                state.loadedCount = Number(info?.windowLength || rawContext()?.chat?.length || 0);
+                state.windowStartIndex = Number(info?.windowStartIndex || 0);
+                state.mode = String(info?.mode || 'windowed');
+            } else {
+                const count = rawContext()?.chat?.length || 0;
+                state.fullCount = count;
+                state.loadedCount = count;
+                state.mode = 'off';
+            }
+        } catch {}
+        updateButton();
+    }
 
-        const context = getContext();
-        if (context) {
-            wrapSaveFunction(context, 'saveChat');
-            wrapSaveFunction(context, 'saveChatConditional');
+    function buttonText() {
+        if (state.loading) return '🧠 正在读取完整历史…';
+        if (state.lastError) return '⚠️ 全量桥失败，点此重试';
+        if (state.bridgeActive) return `✅ 柚月全量 ${state.fullCount} 条`;
+        if (state.fullCount > state.loadedCount && state.loadedCount > 0) {
+            return `🧠 柚月全量 ${state.loadedCount}/${state.fullCount}`;
         }
+        return '🧠 启用柚月全量历史';
     }
 
-    function looksLikeTauri() {
-        return Boolean(
-            globalThis.__TAURI_INTERNALS__
-            || globalThis.__TAURI__
-            || /TauriTavern/i.test(document.documentElement?.innerText || '')
-        );
+    function updateButton() {
+        const button = state.button;
+        if (!button) return;
+        button.textContent = buttonText();
+        button.dataset.state = state.loading
+            ? 'loading'
+            : state.lastError
+                ? 'error'
+                : state.bridgeActive
+                    ? 'active'
+                    : 'idle';
+        button.title = state.bridgeActive
+            ? '柚月现在读取完整历史；30 分钟后自动关闭，重启应用也会恢复普通窗口模式。'
+            : '总结或追溯前先点这里。不会把全部消息渲染到页面。';
     }
 
-    function hasVisibleShowMore() {
-        const nodes = [...document.querySelectorAll('button, a, .menu_button, .mes_load_more, [role="button"]')];
-        return nodes.some((node) => {
-            const text = String(node.textContent || '').trim().toLowerCase();
-            if (!/show\s+more\s+messages|显示更多消息|加载更多消息/.test(text)) return false;
-            const style = globalThis.getComputedStyle?.(node);
-            return !style || (style.display !== 'none' && style.visibility !== 'hidden');
+    function ensureButton() {
+        if (state.button?.isConnected) return;
+        const button = document.createElement('button');
+        button.id = 'yzm-safe-full-history-button';
+        button.type = 'button';
+        button.addEventListener('click', () => {
+            if (state.bridgeActive) {
+                deactivateBridge();
+            } else {
+                activateBridge();
+            }
         });
+        document.body.appendChild(button);
+        state.button = button;
+        updateButton();
     }
 
-    function metadataExpectedTotal(context) {
-        const candidates = [
-            context?.chatMetadata?.message_count,
-            context?.chatMetadata?.messages_count,
-            context?.chatMetadata?.total_messages,
-            context?.chatMetadata?.total_count,
-            context?.chatMetadata?.chat_length,
-            context?.chatMetadata?.floor_count,
-        ];
-        return candidates
-            .map(Number)
-            .filter((value) => Number.isFinite(value) && value >= 0)
-            .sort((a, b) => b - a)[0] || 0;
-    }
-
-    function incompleteHistoryReason() {
-        const context = getContext();
-        const loaded = Array.isArray(context?.chat) ? context.chat.length : 0;
-        const expected = metadataExpectedTotal(context);
-
-        if (hasVisibleShowMore()) {
-            return '聊天顶部仍有“Show more messages / 加载更多消息”，历史尚未完整加载。';
-        }
-        if (expected > loaded) {
-            return `完整聊天预计 ${expected} 条，但当前插件只读取到 ${loaded} 条。`;
-        }
-        return '';
-    }
-
-    function isYuzukiTaskClick(target) {
-        const element = target?.closest?.('button, [role="button"], a, input[type="button"], input[type="submit"]');
+    function isYuzukiAction(target) {
+        const element = target?.closest?.('button, [role="button"], input[type="button"], input[type="submit"]');
         if (!element) return false;
         const text = String(element.textContent || element.value || '').replace(/\s+/g, '');
-        if (!text) return false;
-        const insideYuzuki = Boolean(
-            element.closest?.('[class*="yzm"], [id*="yzm"], [class*="yuzuki"], [id*="yuzuki"]')
-            || /柚月|Yuzuki/i.test(document.body?.innerText || '')
-        );
-        return insideYuzuki && /(总结|追溯|批量填表|手动总结|开始执行|执行任务)/.test(text);
+        return /^(静默执行.*|弹窗确认.*|开始总结.*|执行总结.*|开始追溯.*|执行追溯.*|批量执行.*|重试本批.*|继续后续批次.*)$/.test(text);
     }
 
-    function installTaskSafetyLock() {
-        if (document[PATCHED]) return;
+    function installActionGuard() {
+        if (document.__yzmFullHistoryGuardInstalled) return;
+        document.__yzmFullHistoryGuardInstalled = true;
+
         document.addEventListener('click', (event) => {
-            if (!isYuzukiTaskClick(event.target)) return;
-            const reason = incompleteHistoryReason();
-            if (!reason) return;
+            if (!isYuzukiAction(event.target)) return;
+            if (state.bridgeActive) return;
+
+            const total = state.fullCount;
+            const loaded = state.loadedCount || rawContext()?.chat?.length || 0;
+            if (!(total > loaded)) return;
 
             event.preventDefault();
             event.stopImmediatePropagation();
-            state.blockedIncompleteTasks += 1;
-            const detail = `${reason}\n为避免漏掉前文，安全护栏已阻止本次总结/追溯。请改到电脑全量聊天中执行。`;
-            toast('error', detail, { timeOut: 12000 });
-            try {
-                globalThis.alert?.(detail);
-            } catch {}
-            console.error(`[${MODULE}] 已阻止不完整历史任务。`, { reason });
+            const message = `当前手机只加载 ${loaded}/${total} 条。请先点左下角“柚月全量”按钮，加载成功后关闭并重新打开柚月面板，再执行总结/追溯。`;
+            toast('error', message, 12000);
+            try { globalThis.alert?.(message); } catch {}
         }, true);
-
-        try {
-            Object.defineProperty(document, PATCHED, {
-                value: true,
-                configurable: false,
-                enumerable: false,
-                writable: false,
-            });
-        } catch {}
-    }
-
-    function installEventHooks() {
-        const context = getContext();
-        const eventSource = context?.eventSource;
-        const eventTypes = context?.event_types || globalThis.event_types || {};
-        if (!eventSource?.on) return;
-
-        const names = [
-            'CHAT_CHANGED',
-            'MESSAGE_SENT',
-            'MESSAGE_RECEIVED',
-            'MESSAGE_EDITED',
-            'MESSAGE_DELETED',
-            'GENERATION_ENDED',
-            'GENERATION_STOPPED',
-        ];
-
-        for (const name of names) {
-            const eventName = eventTypes[name];
-            if (!eventName) continue;
-            const marker = `__yzmSafeGuard_${name}`;
-            if (eventSource[marker]) continue;
-            try {
-                eventSource.on(eventName, () => {
-                    sanitizeChat(`事件 ${name}`);
-                    patchSaveHooks();
-                    patchFloorHider();
-                });
-                eventSource[marker] = true;
-            } catch {}
-        }
     }
 
     function healthCheck() {
-        state.lastHealthAt = new Date().toISOString();
-        forceSafeSettings();
+        patchGetContext();
         patchFloorHider();
         patchSaveHooks();
-        sanitizeChat('健康检查');
-        installEventHooks();
-        installTaskSafetyLock();
-        return Boolean(globalThis.YuzukiMemory?.FloorHider && getContext());
-    }
-
-    function stopStartupTimer() {
-        if (state.startupTimer) clearInterval(state.startupTimer);
-        state.startupTimer = null;
-    }
-
-    function beginStartup() {
-        stopStartupTimer();
-        state.startupAttempts = 0;
-
-        const attempt = () => {
-            state.startupAttempts += 1;
-            const ready = healthCheck();
-            if (ready || state.startupAttempts >= STARTUP_LIMIT) {
-                stopStartupTimer();
-                if (ready) {
-                    toast('success', `v${VERSION} 已启用：存档级硬锁生效。`);
-                } else {
-                    toast('warning', `v${VERSION} 已加载，但尚未检测到柚月或聊天上下文。`);
-                }
-            }
-        };
-
-        attempt();
-        if (!globalThis.YuzukiMemory?.FloorHider || !getContext()) {
-            state.startupTimer = setInterval(attempt, STARTUP_INTERVAL);
-        }
+        sanitizeRealChat('健康检查');
+        ensureButton();
+        refreshWindowInfo();
     }
 
     function start() {
         if (state.started) return;
         state.started = true;
-        beginStartup();
+        patchGetContext();
+        ensureButton();
+        installActionGuard();
 
-        if (state.backgroundTimer) clearInterval(state.backgroundTimer);
+        const boot = setInterval(() => {
+            healthCheck();
+            if (globalThis.YuzukiMemory && rawContext()) clearInterval(boot);
+        }, 500);
+        setTimeout(() => clearInterval(boot), 30000);
+
         state.backgroundTimer = setInterval(() => {
             if (document.visibilityState === 'visible') healthCheck();
-        }, BACKGROUND_INTERVAL);
+        }, 60000);
 
         globalThis.addEventListener('focus', healthCheck, { passive: true });
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible') healthCheck();
         }, { passive: true });
-    }
 
-    function stop() {
-        stopStartupTimer();
-        if (state.backgroundTimer) clearInterval(state.backgroundTimer);
-        state.backgroundTimer = null;
-        state.started = false;
-        toast('warning', '安全护栏已停止。');
+        toast('success', `v${VERSION} 已启用：全量历史桥与隔离沙盒就绪。`, 8000);
     }
 
     globalThis[MODULE] = {
         state,
+        activateBridge,
+        deactivateBridge,
+        refreshWindowInfo,
+        sanitizeRealChat,
         healthCheck,
-        sanitizeChat,
-        patchFloorHider,
-        patchSaveHooks,
-        incompleteHistoryReason,
-        start,
-        stop,
     };
 
     if (document.readyState === 'loading') {

@@ -1,0 +1,38 @@
+
+#yzm-safe-full-history-button {
+    position: fixed;
+    left: max(12px, env(safe-area-inset-left));
+    bottom: calc(76px + env(safe-area-inset-bottom));
+    z-index: 2147483000;
+    min-width: 112px;
+    max-width: 58vw;
+    padding: 9px 12px;
+    border: 1px solid color-mix(in srgb, currentColor 45%, transparent);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #202020) 92%, transparent);
+    color: var(--SmartThemeBodyColor, #fff);
+    box-shadow: 0 4px 18px rgba(0,0,0,.28);
+    font: inherit;
+    font-size: 13px;
+    line-height: 1.2;
+    text-align: center;
+    cursor: pointer;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+}
+#yzm-safe-full-history-button[data-state="loading"] {
+    opacity: .75;
+    pointer-events: none;
+}
+#yzm-safe-full-history-button[data-state="active"] {
+    border-color: #62b889;
+}
+#yzm-safe-full-history-button[data-state="error"] {
+    border-color: #d76f6f;
+}
+@media (min-width: 900px) {
+    #yzm-safe-full-history-button {
+        bottom: 18px;
+        left: 18px;
+    }
+}
