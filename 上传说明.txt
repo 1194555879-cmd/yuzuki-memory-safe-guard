@@ -1,11 +1,18 @@
-柚月护栏 v0.5.2 上传顺序
+柚月护栏 v0.6.0 上传说明
 
-1. 上传并覆盖 index.js
-2. 上传并覆盖 style.css
-3. 上传并覆盖 manifest.json
-4. 上传并覆盖 README.md
-5. GitHub 提交说明可写：
-   v0.5.2: auto bridge Yuzuki panel and keep real floor count
-6. TauriTavern 扩展管理 → 更新
-7. 彻底退出 TauriTavern → 重新打开
-8. 自动化先不要开启，按 README 的 7 步测试
+覆盖上传：
+1. index.js
+2. style.css
+3. manifest.json
+4. README.md
+
+Commit 可写：
+v0.6.0: protect Yuzuki background automation with full history
+
+安装后：
+1. TauriTavern 扩展管理 → 更新
+2. 彻底退出 App → 重开
+3. 导出测试聊天 JSONL
+4. 只开一个自动任务，间隔设为 2～4 层
+5. 聊一轮，等待自动任务完成
+6. 打开柚月面板验收楼层、范围和记忆内容
