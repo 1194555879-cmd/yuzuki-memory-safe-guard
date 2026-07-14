@@ -1,0 +1,17 @@
+柚月记忆安全护栏 v0.5.0 悬浮球热修复
+
+已确认的 bug：
+原 style.css 同时给 idle 状态设置了 pointer-events:none，后面虽然把 opacity 改回 .9，
+但没有恢复 pointer-events，所以悬浮球“看得见、永远点不到”。
+
+本热修复：
+1. idle 状态改为 pointer-events:auto；
+2. error 状态也明确允许点击；
+3. active/loading 状态继续禁止点击，避免任务中重复触发。
+
+安装：
+用本文件夹中的 style.css 覆盖扩展目录原 style.css，然后在 TauriTavern 更新扩展并彻底退出重开。
+
+重要：
+仓库 v0.5.0 的 README 明确写着：后台自动化仍建议关闭；当前可靠拦截的是手动点击触发的总结、追溯和批次按钮。
+在自动化支持另行补齐前，不要重新开启柚月后台自动化。
