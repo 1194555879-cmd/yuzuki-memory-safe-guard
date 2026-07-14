@@ -2,26 +2,30 @@
     'use strict';
 
     const MODULE = 'YuzukiMemorySafeGuard';
-    const VERSION = '0.3.0';
-    const PATCHED = Symbol.for('yzm.safe.guard.patched.v030');
-    const BRIDGE_TTL_MS = 30 * 60 * 1000;
+    const VERSION = '0.4.0';
+    const PATCHED = Symbol.for('yzm.safe.guard.patched.v040');
+    const SENTINEL_FLAG = '__yzm_safe_boundary_sentinel__';
+    const REFRESH_DEBOUNCE_MS = 650;
 
     const state = {
         version: VERSION,
         started: false,
         originalGetContext: null,
         bridgeActive: false,
-        bridgeExpiresAt: 0,
         fullMessages: [],
-        fullCount: 0,
+        realFullCount: 0,
+        sandboxCount: 0,
         loadedCount: 0,
         windowStartIndex: 0,
         mode: 'unknown',
         loading: false,
         lastError: '',
-        knownDialogueKeys: new Set(),
-        button: null,
+        currentChatKey: '',
+        refreshTimer: null,
         backgroundTimer: null,
+        button: null,
+        knownDialogueKeys: new Set(),
+        taskReplayGuard: false,
     };
 
     function clone(value) {
@@ -58,6 +62,7 @@
 
     function isDialogueMessage(message) {
         if (!message || typeof message !== 'object') return false;
+        if (message[SENTINEL_FLAG]) return false;
         if (String(message.role || '').toLowerCase() === 'system') return false;
         if (
             message.isGaigaiPrompt
@@ -95,8 +100,7 @@
     }
 
     function sanitizeRealChat(reason = '检查') {
-        const context = rawContext();
-        const chat = context?.chat;
+        const chat = rawContext()?.chat;
         if (!Array.isArray(chat)) return 0;
 
         let restored = 0;
@@ -112,7 +116,7 @@
 
             if (!shouldRestore) continue;
 
-            message.is_system = false;
+            try { message.is_system = false; } catch {}
             try { delete message.is_yzm_hidden_floor; } catch {}
             restored += 1;
             rememberDialogue([message]);
@@ -125,25 +129,36 @@
         return restored;
     }
 
-    function bridgeExpired() {
-        return state.bridgeActive && Date.now() >= state.bridgeExpiresAt;
+    function makeBoundarySentinel(realCount) {
+        return {
+            role: 'system',
+            is_system: true,
+            is_user: false,
+            name: '柚月安全护栏',
+            mes: '',
+            content: '',
+            send_date: Date.now(),
+            yzmMemoryInternal: true,
+            [SENTINEL_FLAG]: true,
+            extra: {
+                type: 'boundary_sentinel',
+                realCount,
+                note: '沙盒边界占位，不属于真实聊天，不参与总结。',
+            },
+        };
     }
 
-    function deactivateBridge(silent = false) {
-        state.bridgeActive = false;
-        state.bridgeExpiresAt = 0;
-        state.fullMessages = [];
-        state.fullCount = 0;
-        state.lastError = '';
-        updateButton();
-        if (!silent) toast('info', '全量历史桥已关闭。重新打开时可再次加载。');
+    function stripSentinels(messages) {
+        return Array.isArray(messages)
+            ? messages.filter((message) => !message?.[SENTINEL_FLAG])
+            : [];
     }
 
     function makeBridgeContext(context) {
-        const safeChat = state.fullMessages;
         return new Proxy(context, {
             get(target, prop, receiver) {
-                if (prop === 'chat') return safeChat;
+                if (prop === 'chat') return state.fullMessages;
+
                 if (prop === 'saveChat' || prop === 'saveChatConditional') {
                     const fn = Reflect.get(target, prop, receiver);
                     if (typeof fn !== 'function') return fn;
@@ -152,11 +167,12 @@
                         return await fn.apply(target, args);
                     };
                 }
+
                 return Reflect.get(target, prop, receiver);
             },
             set(target, prop, value, receiver) {
                 if (prop === 'chat') {
-                    console.warn(`[${MODULE}] 已阻止扩展替换原聊天数组。`);
+                    console.warn(`[${MODULE}] 已阻止扩展替换真实聊天数组。`);
                     return true;
                 }
                 return Reflect.set(target, prop, value, receiver);
@@ -172,14 +188,11 @@
         state.originalGetContext = st.getContext.bind(st);
         const wrapped = function guardedGetContext() {
             const context = state.originalGetContext();
-            if (bridgeExpired()) deactivateBridge(true);
             if (!state.bridgeActive || !context) return context;
             return makeBridgeContext(context);
         };
 
-        try {
-            Object.defineProperty(wrapped, PATCHED, { value: true });
-        } catch {}
+        try { Object.defineProperty(wrapped, PATCHED, { value: true }); } catch {}
         st.getContext = wrapped;
         return true;
     }
@@ -233,6 +246,7 @@
                 sanitizeRealChat(`保存前 ${name}`);
                 return await current.apply(this, args);
             };
+
             try {
                 Object.defineProperty(wrapped, PATCHED, { value: true });
                 owner[name] = wrapped;
@@ -240,7 +254,7 @@
         }
     }
 
-    async function waitForTauriHost() {
+    async function waitForTauriChatApi() {
         const host = globalThis.__TAURITAVERN__;
         if (!host) return null;
         try {
@@ -250,7 +264,7 @@
     }
 
     async function readFullTauriHistory() {
-        const api = await waitForTauriHost();
+        const api = await waitForTauriChatApi();
         if (!api?.current?.handle || !api?.current?.windowInfo) {
             throw new Error('未检测到 TauriTavern 完整历史 API。');
         }
@@ -269,7 +283,9 @@
         while (page?.hasMoreBefore) {
             page = await handle.history.before(page, { limit });
             pages.unshift(page);
-            if (pages.length > 1000) throw new Error('历史分页数量异常，已停止。');
+            if (pages.length > 1000) {
+                throw new Error('历史分页数量异常，已停止。');
+            }
         }
 
         const indexed = [];
@@ -282,6 +298,7 @@
         }
 
         indexed.sort((a, b) => a.index - b.index);
+
         const seen = new Set();
         const full = [];
         for (const entry of indexed) {
@@ -294,102 +311,182 @@
             throw new Error(`完整历史读取不一致：应有 ${totalCount} 条，实际取得 ${full.length} 条。`);
         }
 
+        const key = [
+            String(info?.chatId ?? info?.id ?? ''),
+            String(info?.fileName ?? info?.filename ?? ''),
+            String(totalCount || full.length),
+        ].join('|');
+
         return {
             messages: full,
             totalCount: totalCount || full.length,
             loadedCount: Number(info?.windowLength || rawContext()?.chat?.length || 0),
             windowStartIndex: Number(info?.windowStartIndex || 0),
             mode: String(info?.mode || 'windowed'),
+            chatKey: key,
         };
     }
 
     async function readDesktopHistory() {
-        const chat = rawContext()?.chat;
+        const context = rawContext();
+        const chat = context?.chat;
         if (!Array.isArray(chat)) throw new Error('当前没有打开聊天。');
+
         return {
             messages: clone(chat),
             totalCount: chat.length,
             loadedCount: chat.length,
             windowStartIndex: 0,
             mode: 'off',
+            chatKey: String(context?.chatId ?? context?.chatName ?? context?.characterId ?? chat.length),
         };
     }
 
-    async function activateBridge() {
-        if (state.loading) return;
+    function buildSandbox(realMessages) {
+        const safe = stripSentinels(clone(realMessages));
+
+        for (const message of safe) {
+            if (isDialogueMessage(message)) {
+                try { message.is_system = false; } catch {}
+                try { delete message.is_yzm_hidden_floor; } catch {}
+            }
+        }
+
+        const realCount = safe.length;
+        safe.push(makeBoundarySentinel(realCount));
+        return {
+            sandbox: safe,
+            realCount,
+            sandboxCount: safe.length,
+        };
+    }
+
+    async function activateBridge({ silent = false, force = false } = {}) {
+        if (state.loading) return false;
+        if (state.bridgeActive && !force) return true;
+
         state.loading = true;
         state.lastError = '';
         updateButton();
 
         try {
             sanitizeRealChat('启用全量桥前');
+
             const result = globalThis.__TAURITAVERN__
                 ? await readFullTauriHistory()
                 : await readDesktopHistory();
 
-            result.messages.forEach((message) => {
-                if (isDialogueMessage(message)) {
-                    message.is_system = false;
-                    try { delete message.is_yzm_hidden_floor; } catch {}
-                }
-            });
+            const built = buildSandbox(result.messages);
 
-            state.fullMessages = result.messages;
-            state.fullCount = result.totalCount;
+            state.fullMessages = built.sandbox;
+            state.realFullCount = built.realCount;
+            state.sandboxCount = built.sandboxCount;
             state.loadedCount = result.loadedCount;
             state.windowStartIndex = result.windowStartIndex;
             state.mode = result.mode;
+            state.currentChatKey = result.chatKey;
             state.bridgeActive = true;
-            state.bridgeExpiresAt = Date.now() + BRIDGE_TTL_MS;
             rememberDialogue(result.messages);
 
-            toast(
-                'success',
-                `全量历史桥已启用：柚月将读取 ${state.fullCount} 条；页面仍只渲染 ${state.loadedCount} 条。请关闭并重新打开柚月面板。`,
-                12000,
-            );
+            if (!silent) {
+                toast(
+                    'success',
+                    `全量历史桥已启用：真实 ${state.realFullCount} 条，已添加 1 条沙盒边界用于覆盖最后一楼。`,
+                    10000,
+                );
+            }
+
+            return true;
         } catch (error) {
             state.bridgeActive = false;
             state.lastError = String(error?.message || error || '加载失败');
             console.error(`[${MODULE}] 全量历史桥加载失败`, error);
             toast('error', `全量历史桥加载失败：${state.lastError}`, 12000);
+            return false;
         } finally {
             state.loading = false;
             updateButton();
         }
     }
 
-    async function refreshWindowInfo() {
-        try {
-            if (globalThis.__TAURITAVERN__?.api?.chat?.current?.windowInfo) {
-                const info = await globalThis.__TAURITAVERN__.api.chat.current.windowInfo();
-                state.fullCount = Number(info?.totalCount || state.fullCount || 0);
-                state.loadedCount = Number(info?.windowLength || rawContext()?.chat?.length || 0);
-                state.windowStartIndex = Number(info?.windowStartIndex || 0);
-                state.mode = String(info?.mode || 'windowed');
-            } else {
-                const count = rawContext()?.chat?.length || 0;
-                state.fullCount = count;
-                state.loadedCount = count;
-                state.mode = 'off';
-            }
-        } catch {}
+    function deactivateBridge({ silent = false } = {}) {
+        state.bridgeActive = false;
+        state.fullMessages = [];
+        state.realFullCount = 0;
+        state.sandboxCount = 0;
+        state.loadedCount = 0;
+        state.windowStartIndex = 0;
+        state.currentChatKey = '';
+        state.lastError = '';
         updateButton();
+        if (!silent) toast('info', '全量历史桥已关闭。');
+    }
+
+    function scheduleBridgeRefresh(reason = '聊天变更') {
+        if (state.refreshTimer) clearTimeout(state.refreshTimer);
+        state.refreshTimer = setTimeout(async () => {
+            console.info(`[${MODULE}] ${reason}，刷新全量历史桥。`);
+            await activateBridge({ silent: true, force: true });
+        }, REFRESH_DEBOUNCE_MS);
+    }
+
+    function isYuzukiAction(target) {
+        const element = target?.closest?.('button, [role="button"], input[type="button"], input[type="submit"]');
+        if (!element) return null;
+        const text = String(element.textContent || element.value || '').replace(/\s+/g, '');
+        if (!text) return null;
+
+        const matches = /(静默执行|弹窗确认|开始总结|执行总结|开始追溯|执行追溯|批量执行|重试本批|继续后续批次|开始填表|执行任务)/.test(text);
+        return matches ? element : null;
+    }
+
+    function installActionAutoBridge() {
+        if (document.__yzmSafeAutoBridgeInstalled) return;
+        document.__yzmSafeAutoBridgeInstalled = true;
+
+        document.addEventListener('click', async (event) => {
+            const element = isYuzukiAction(event.target);
+            if (!element) return;
+            if (state.taskReplayGuard) return;
+
+            if (state.bridgeActive) return;
+
+            event.preventDefault();
+            event.stopImmediatePropagation();
+
+            const ok = await activateBridge({ silent: false, force: true });
+            if (!ok) {
+                const message = '完整历史桥未就绪，本次总结/追溯已取消，避免漏掉前文。';
+                toast('error', message, 12000);
+                try { globalThis.alert?.(message); } catch {}
+                return;
+            }
+
+            state.taskReplayGuard = true;
+            try {
+                // 让柚月在同一面板内重新读取桥接后的 context.chat。
+                await new Promise((resolve) => setTimeout(resolve, 120));
+                element.click();
+            } finally {
+                setTimeout(() => { state.taskReplayGuard = false; }, 0);
+            }
+        }, true);
     }
 
     function buttonText() {
-        if (state.loading) return '🧠 正在读取完整历史…';
-        if (state.lastError) return '⚠️ 全量桥失败，点此重试';
-        if (state.bridgeActive) return `✅ 柚月全量 ${state.fullCount} 条`;
-        if (state.fullCount > state.loadedCount && state.loadedCount > 0) {
-            return `🧠 柚月全量 ${state.loadedCount}/${state.fullCount}`;
+        if (state.loading) return '🧠 读取中…';
+        if (state.lastError) return '⚠️ 全量桥失败';
+        if (state.bridgeActive) return `✅ ${state.realFullCount}+1`;
+        if (state.realFullCount > 0 && state.loadedCount > 0) {
+            return `🧠 ${state.loadedCount}/${state.realFullCount}`;
         }
-        return '🧠 启用柚月全量历史';
+        return '🧠 全量';
     }
 
     function updateButton() {
         const button = state.button;
         if (!button) return;
+
         button.textContent = buttonText();
         button.dataset.state = state.loading
             ? 'loading'
@@ -398,53 +495,67 @@
                 : state.bridgeActive
                     ? 'active'
                     : 'idle';
+
         button.title = state.bridgeActive
-            ? '柚月现在读取完整历史；30 分钟后自动关闭，重启应用也会恢复普通窗口模式。'
-            : '总结或追溯前先点这里。不会把全部消息渲染到页面。';
+            ? `已自动启用：真实 ${state.realFullCount} 条＋1 条沙盒边界。按钮已自动隐藏。`
+            : '自动启用失败时可点此重试。';
     }
 
     function ensureButton() {
         if (state.button?.isConnected) return;
+
         const button = document.createElement('button');
         button.id = 'yzm-safe-full-history-button';
         button.type = 'button';
         button.addEventListener('click', () => {
             if (state.bridgeActive) {
-                deactivateBridge();
+                activateBridge({ silent: false, force: true });
             } else {
-                activateBridge();
+                activateBridge({ silent: false, force: true });
             }
         });
+
         document.body.appendChild(button);
         state.button = button;
         updateButton();
     }
 
-    function isYuzukiAction(target) {
-        const element = target?.closest?.('button, [role="button"], input[type="button"], input[type="submit"]');
-        if (!element) return false;
-        const text = String(element.textContent || element.value || '').replace(/\s+/g, '');
-        return /^(静默执行.*|弹窗确认.*|开始总结.*|执行总结.*|开始追溯.*|执行追溯.*|批量执行.*|重试本批.*|继续后续批次.*)$/.test(text);
-    }
+    function installEventHooks() {
+        const context = rawContext();
+        const eventSource = context?.eventSource;
+        const eventTypes = context?.event_types || globalThis.event_types || {};
+        if (!eventSource?.on) return;
 
-    function installActionGuard() {
-        if (document.__yzmFullHistoryGuardInstalled) return;
-        document.__yzmFullHistoryGuardInstalled = true;
+        const refreshEvents = [
+            'CHAT_CHANGED',
+            'MESSAGE_SENT',
+            'MESSAGE_RECEIVED',
+            'MESSAGE_EDITED',
+            'MESSAGE_DELETED',
+            'GENERATION_ENDED',
+        ];
 
-        document.addEventListener('click', (event) => {
-            if (!isYuzukiAction(event.target)) return;
-            if (state.bridgeActive) return;
+        for (const name of refreshEvents) {
+            const eventName = eventTypes[name];
+            if (!eventName) continue;
 
-            const total = state.fullCount;
-            const loaded = state.loadedCount || rawContext()?.chat?.length || 0;
-            if (!(total > loaded)) return;
+            const marker = `__yzmSafeGuardV040_${name}`;
+            if (eventSource[marker]) continue;
 
-            event.preventDefault();
-            event.stopImmediatePropagation();
-            const message = `当前手机只加载 ${loaded}/${total} 条。请先点左下角“柚月全量”按钮，加载成功后关闭并重新打开柚月面板，再执行总结/追溯。`;
-            toast('error', message, 12000);
-            try { globalThis.alert?.(message); } catch {}
-        }, true);
+            try {
+                eventSource.on(eventName, () => {
+                    sanitizeRealChat(`事件 ${name}`);
+                    patchFloorHider();
+                    patchSaveHooks();
+
+                    if (name === 'CHAT_CHANGED') {
+                        deactivateBridge({ silent: true });
+                    }
+                    scheduleBridgeRefresh(name);
+                });
+                eventSource[marker] = true;
+            } catch {}
+        }
     }
 
     function healthCheck() {
@@ -453,39 +564,54 @@
         patchSaveHooks();
         sanitizeRealChat('健康检查');
         ensureButton();
-        refreshWindowInfo();
+        installActionAutoBridge();
+        installEventHooks();
     }
 
-    function start() {
+    async function start() {
         if (state.started) return;
         state.started = true;
+
         patchGetContext();
         ensureButton();
-        installActionGuard();
+        installActionAutoBridge();
 
-        const boot = setInterval(() => {
+        const boot = setInterval(async () => {
             healthCheck();
-            if (globalThis.YuzukiMemory && rawContext()) clearInterval(boot);
+            if (globalThis.YuzukiMemory && rawContext()) {
+                clearInterval(boot);
+                await activateBridge({ silent: true, force: true });
+                toast(
+                    'success',
+                    `v${VERSION} 已启用：自动全量桥、最后一楼边界与隔离沙盒已就绪。`,
+                    9000,
+                );
+            }
         }, 500);
+
         setTimeout(() => clearInterval(boot), 30000);
 
         state.backgroundTimer = setInterval(() => {
             if (document.visibilityState === 'visible') healthCheck();
         }, 60000);
 
-        globalThis.addEventListener('focus', healthCheck, { passive: true });
-        document.addEventListener('visibilitychange', () => {
-            if (document.visibilityState === 'visible') healthCheck();
+        globalThis.addEventListener('focus', () => {
+            healthCheck();
+            scheduleBridgeRefresh('回到前台');
         }, { passive: true });
 
-        toast('success', `v${VERSION} 已启用：全量历史桥与隔离沙盒就绪。`, 8000);
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') {
+                healthCheck();
+                scheduleBridgeRefresh('页面重新可见');
+            }
+        }, { passive: true });
     }
 
     globalThis[MODULE] = {
         state,
         activateBridge,
         deactivateBridge,
-        refreshWindowInfo,
         sanitizeRealChat,
         healthCheck,
     };

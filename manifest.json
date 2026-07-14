@@ -9,8 +9,8 @@
   "js": "index.js",
   "css": "style.css",
   "author": "Krystal & 顾星野",
-  "version": "0.3.0",
-  "description": "全量历史桥＋隔离沙盒：TauriTavern 手机端可读取完整历史，同时不让柚月修改原聊天。",
+  "version": "0.4.0",
+  "description": "自动全量历史桥、最后一楼边界修复、隔离沙盒与存档硬锁。",
   "auto_update": false,
   "minimum_client_version": "1.18.0"
 }

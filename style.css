@@ -1,38 +1,46 @@
 
 #yzm-safe-full-history-button {
     position: fixed;
-    left: max(12px, env(safe-area-inset-left));
-    bottom: calc(76px + env(safe-area-inset-bottom));
+    left: max(10px, env(safe-area-inset-left));
+    bottom: calc(72px + env(safe-area-inset-bottom));
     z-index: 2147483000;
-    min-width: 112px;
+    min-width: 38px;
+    min-height: 38px;
     max-width: 58vw;
-    padding: 9px 12px;
-    border: 1px solid color-mix(in srgb, currentColor 45%, transparent);
+    padding: 7px 10px;
+    border: 1px solid color-mix(in srgb, currentColor 42%, transparent);
     border-radius: 999px;
     background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #202020) 92%, transparent);
     color: var(--SmartThemeBodyColor, #fff);
-    box-shadow: 0 4px 18px rgba(0,0,0,.28);
+    box-shadow: 0 4px 16px rgba(0,0,0,.25);
     font: inherit;
-    font-size: 13px;
-    line-height: 1.2;
+    font-size: 12px;
+    line-height: 1.15;
     text-align: center;
     cursor: pointer;
     user-select: none;
     -webkit-tap-highlight-color: transparent;
+    transition: opacity .2s ease, transform .2s ease;
 }
 #yzm-safe-full-history-button[data-state="loading"] {
-    opacity: .75;
+    opacity: .8;
     pointer-events: none;
 }
 #yzm-safe-full-history-button[data-state="active"] {
-    border-color: #62b889;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(8px) scale(.9);
 }
 #yzm-safe-full-history-button[data-state="error"] {
     border-color: #d76f6f;
+    opacity: 1;
+}
+#yzm-safe-full-history-button[data-state="idle"] {
+    opacity: .9;
 }
 @media (min-width: 900px) {
     #yzm-safe-full-history-button {
-        bottom: 18px;
-        left: 18px;
+        left: 16px;
+        bottom: 16px;
     }
 }
