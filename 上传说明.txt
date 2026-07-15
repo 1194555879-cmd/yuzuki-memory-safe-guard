@@ -1,4 +1,4 @@
-柚月护栏 v0.6.0 上传说明
+柚月护栏 v0.6.1 上传说明
 
 覆盖上传：
 1. index.js
@@ -7,12 +7,7 @@
 4. README.md
 
 Commit 可写：
-v0.6.0: protect Yuzuki background automation with full history
+v0.6.1: prevent full-history bridge from leaking into normal generation
 
-安装后：
-1. TauriTavern 扩展管理 → 更新
-2. 彻底退出 App → 重开
-3. 导出测试聊天 JSONL
-4. 只开一个自动任务，间隔设为 2～4 层
-5. 聊一轮，等待自动任务完成
-6. 打开柚月面板验收楼层、范围和记忆内容
+更新后必须彻底退出 TauriTavern 再重开。
+后台自动总结、自动填表继续关闭。

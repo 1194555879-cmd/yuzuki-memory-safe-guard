@@ -9,8 +9,8 @@
   "js": "index.js",
   "css": "style.css",
   "author": "Krystal & 顾星野",
-  "version": "0.6.0",
-  "description": "真实楼层常驻；面板自动桥接；后台自动总结/追溯在生成结束后预加载完整历史；读取失败自动取消本轮任务；含分页冲突重试与隐藏楼层保护。",
+  "version": "0.6.1",
+  "description": "安全热修复：保留真实楼层与面板自动同步；普通发送、重生成、继续及回车生成前强制释放全量历史桥，避免完整聊天被塞进主模型请求导致百万 token。",
   "homePage": "https://github.com/1194555879-cmd/yuzuki-memory-safe-guard",
   "auto_update": true,
   "minimum_client_version": "1.18.0"
