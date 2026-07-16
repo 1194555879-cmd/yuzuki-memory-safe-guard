@@ -2,8 +2,8 @@
   'use strict';
 
   const MODULE = 'YuzukiMemorySafeGuard';
-  const VERSION = '0.6.1';
-  const PATCHED = Symbol.for('yzm.safe.guard.patched.v061');
+  const VERSION = '0.6.2';
+  const PATCHED = Symbol.for('yzm.safe.guard.patched.v062');
   const SENTINEL_FLAG = '__yzm_safe_boundary_sentinel__';
 
   const state = {
@@ -34,6 +34,12 @@
     panelScanQueued: false,
     refreshQueued: false,
     knownDialogueKeys: new Set(),
+    claudeContextLimit: 800000,
+    openAIModule: null,
+    openAIModulePromise: null,
+    contextLockReplayGuard: false,
+    contextLockLastToastAt: 0,
+    contextLockApplied: false,
   };
 
   function clone(value) {
@@ -709,8 +715,8 @@
   }
 
   function installActionAutoBridge() {
-    if (document.__yzmSafeAutoBridgeInstalledV061) return;
-    document.__yzmSafeAutoBridgeInstalledV061 = true;
+    if (document.__yzmSafeAutoBridgeInstalledV062) return;
+    document.__yzmSafeAutoBridgeInstalledV062 = true;
 
     document.addEventListener(
       'click',
@@ -771,12 +777,173 @@
   }
 
 
-  function isNormalGenerationControl(target) {
+
+  function getOpenAIModule() {
+    if (state.openAIModule) return Promise.resolve(state.openAIModule);
+    if (state.openAIModulePromise) return state.openAIModulePromise;
+
+    state.openAIModulePromise = import('/scripts/openai.js')
+      .then(module => {
+        state.openAIModule = module;
+        return module;
+      })
+      .catch(error => {
+        state.openAIModulePromise = null;
+        console.warn(`[${MODULE}] 无法载入 Chat Completion 设置模块`, error);
+        return null;
+      });
+
+    return state.openAIModulePromise;
+  }
+
+  function selectedValue(selector) {
+    const element = document.querySelector(selector);
+    if (!element) return '';
+    return String(
+      element.value ??
+      element.options?.[element.selectedIndex]?.value ??
+      element.options?.[element.selectedIndex]?.text ??
+      '',
+    );
+  }
+
+  function modelNameFromSettings(settings = null) {
+    const source = String(
+      settings?.chat_completion_source ??
+      selectedValue('#chat_completion_source') ??
+      '',
+    ).toLowerCase();
+
+    const candidates = [
+      settings?.claude_model,
+      settings?.custom_model,
+      settings?.openrouter_model,
+      settings?.openai_model,
+      settings?.google_model,
+      selectedValue('#model_claude_select'),
+      selectedValue('#custom_model_id'),
+      selectedValue('#model_openrouter_select'),
+      selectedValue('#model_openai_select'),
+      selectedValue('#model_google_select'),
+      document.querySelector('#custom_model_id')?.getAttribute?.('placeholder'),
+    ]
+      .filter(Boolean)
+      .map(value => String(value));
+
+    const model = candidates.find(value =>
+      /claude|anthropic|opus|sonnet|haiku/i.test(value),
+    ) || candidates[0] || '';
+
+    return { source, model };
+  }
+
+  function isClaudeRoute(settings = null) {
+    const { source, model } = modelNameFromSettings(settings);
+    if (source === 'claude') return true;
+    return /claude|anthropic|opus|sonnet|haiku/i.test(model);
+  }
+
+  function contextLockStatusSync() {
+    const settings = state.openAIModule?.oai_settings ?? null;
+    const input = document.querySelector('#openai_max_context');
+    const checkbox = document.querySelector('#oai_max_context_unlocked');
+
+    const value = Number(
+      settings?.openai_max_context ??
+      input?.value ??
+      0,
+    );
+
+    const unlocked = Boolean(
+      settings?.max_context_unlocked ??
+      checkbox?.checked ??
+      false,
+    );
+
+    const claude = isClaudeRoute(settings);
+    const unsafe = claude && (
+      unlocked ||
+      (Number.isFinite(value) && value > state.claudeContextLimit)
+    );
+
+    return { settings, input, checkbox, value, unlocked, claude, unsafe };
+  }
+
+  function updateContextLockUi(limit) {
+    const checkbox = document.querySelector('#oai_max_context_unlocked');
+    const input = document.querySelector('#openai_max_context');
+
+    if (checkbox?.checked) {
+      checkbox.checked = false;
+      checkbox.dispatchEvent(new Event('input', { bubbles: true }));
+      checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    if (input && Number(input.value) !== limit) {
+      input.value = String(limit);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }
+
+  async function enforceClaudeContextLock({
+    silent = false,
+    reason = 'runtime',
+  } = {}) {
+    const module = await getOpenAIModule();
+    const settings = module?.oai_settings ?? state.openAIModule?.oai_settings ?? null;
+
+    // 先更新界面，让 SillyTavern 自己的监听器同步内部设置。
+    if (isClaudeRoute(settings)) {
+      updateContextLockUi(state.claudeContextLimit);
+    }
+
+    if (settings && isClaudeRoute(settings)) {
+      settings.max_context_unlocked = false;
+      settings.openai_max_context = state.claudeContextLimit;
+
+      // 某些 UI 监听器会在 change 后又写回最大值，所以最后再覆盖一次。
+      queueMicrotask(() => {
+        try {
+          settings.max_context_unlocked = false;
+          settings.openai_max_context = state.claudeContextLimit;
+          updateContextLockUi(state.claudeContextLimit);
+        } catch {}
+      });
+    }
+
+    const after = contextLockStatusSync();
+    state.contextLockApplied = after.claude && !after.unsafe;
+
+    if (after.claude && !silent) {
+      const now = Date.now();
+      if (now - state.contextLockLastToastAt > 8000) {
+        state.contextLockLastToastAt = now;
+        toast(
+          'info',
+          `Claude 上下文已锁定为 ${state.claudeContextLimit.toLocaleString()}，不会再被界面跳回 200 万带进请求。`,
+          6500,
+        );
+      }
+    }
+
+    console.info(`[${MODULE}] Claude context safety lock`, {
+      reason,
+      claude: after.claude,
+      value: after.value,
+      unlocked: after.unlocked,
+      applied: state.contextLockApplied,
+    });
+
+    return state.contextLockApplied || !after.claude;
+  }
+
+  function getNormalGenerationControl(target) {
     const element = target?.closest?.(
       'button,[role="button"],input[type="button"],input[type="submit"],a',
     );
-    if (!element) return false;
-    if (isYuzukiAction(element)) return false;
+    if (!element) return null;
+    if (isYuzukiAction(element)) return null;
 
     const id = String(element.id || '').toLowerCase();
     const classes = String(element.className || '').toLowerCase();
@@ -789,10 +956,16 @@
         `${id} ${classes}`,
       )
     ) {
-      return true;
+      return element;
     }
 
-    return /^(发送|继续|重新生成|重生成|生成回复|重试回复|下一条|保存并发送)$/.test(text);
+    return /^(发送|继续|重新生成|重生成|生成回复|重试回复|下一条|保存并发送)$/.test(text)
+      ? element
+      : null;
+  }
+
+  function isNormalGenerationControl(target) {
+    return Boolean(getNormalGenerationControl(target));
   }
 
   function releaseBeforeNormalGeneration(reason = 'normal-generation') {
@@ -803,22 +976,68 @@
   }
 
   function installGenerationReleaseGuard() {
-    if (document.__yzmSafeGenerationReleaseInstalledV061) return;
-    document.__yzmSafeGenerationReleaseInstalledV061 = true;
+    if (document.__yzmSafeGenerationReleaseInstalledV062) return;
+    document.__yzmSafeGenerationReleaseInstalledV062 = true;
 
-    const handlePointer = event => {
-      if (isNormalGenerationControl(event.target)) {
+    const releaseOnPointer = event => {
+      if (getNormalGenerationControl(event.target)) {
         releaseBeforeNormalGeneration('generation-control');
       }
     };
 
-    document.addEventListener('pointerdown', handlePointer, true);
-    document.addEventListener('touchstart', handlePointer, true);
-    document.addEventListener('click', handlePointer, true);
+    document.addEventListener('pointerdown', releaseOnPointer, true);
+    document.addEventListener('touchstart', releaseOnPointer, true);
+
+    document.addEventListener(
+      'click',
+      async event => {
+        const control = getNormalGenerationControl(event.target);
+        if (!control) return;
+
+        releaseBeforeNormalGeneration('generation-click');
+
+        if (state.contextLockReplayGuard) return;
+
+        const status = contextLockStatusSync();
+        if (!status.unsafe) {
+          // 即使当前看起来安全，也异步校准一次内部设置。
+          enforceClaudeContextLock({ silent: true, reason: 'generation-safe-check' });
+          return;
+        }
+
+        event.preventDefault();
+        event.stopImmediatePropagation();
+
+        const ok = await enforceClaudeContextLock({
+          silent: false,
+          reason: 'generation-blocked',
+        });
+
+        if (!ok) {
+          toast(
+            'error',
+            '无法锁定 Claude 上下文，本次发送已暂停。请重新打开设置页后再试。',
+            10000,
+          );
+          return;
+        }
+
+        state.contextLockReplayGuard = true;
+        try {
+          await sleep(80);
+          control.click();
+        } finally {
+          setTimeout(() => {
+            state.contextLockReplayGuard = false;
+          }, 0);
+        }
+      },
+      true,
+    );
 
     document.addEventListener(
       'keydown',
-      event => {
+      async event => {
         if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return;
 
         const target = event.target;
@@ -826,8 +1045,48 @@
           target?.matches?.('#send_textarea, textarea#send_textarea, [contenteditable="true"]') ||
           target?.closest?.('#send_textarea');
 
-        if (isChatInput) {
-          releaseBeforeNormalGeneration('chat-enter');
+        if (!isChatInput) return;
+
+        releaseBeforeNormalGeneration('chat-enter');
+
+        const status = contextLockStatusSync();
+        if (!status.unsafe) {
+          enforceClaudeContextLock({ silent: true, reason: 'enter-safe-check' });
+          return;
+        }
+
+        event.preventDefault();
+        event.stopImmediatePropagation();
+
+        const ok = await enforceClaudeContextLock({
+          silent: false,
+          reason: 'enter-blocked',
+        });
+
+        if (!ok) {
+          toast(
+            'error',
+            '无法锁定 Claude 上下文，本次发送已暂停。',
+            10000,
+          );
+          return;
+        }
+
+        const sendButton =
+          document.querySelector('#send_but') ||
+          document.querySelector('[id*="send"][role="button"]') ||
+          document.querySelector('button[aria-label*="发送"]');
+
+        if (sendButton) {
+          state.contextLockReplayGuard = true;
+          try {
+            await sleep(80);
+            sendButton.click();
+          } finally {
+            setTimeout(() => {
+              state.contextLockReplayGuard = false;
+            }, 0);
+          }
         }
       },
       true,
@@ -855,11 +1114,15 @@
           ? 'active'
           : 'idle';
 
+    const lockHint = contextLockStatusSync().claude
+      ? `；Claude 上下文安全锁 ${state.claudeContextLimit.toLocaleString()}`
+      : '';
+
     button.title = state.bridgeActive
-      ? `完整历史已启用，共 ${state.realFullCount} 层。`
+      ? `完整历史已启用，共 ${state.realFullCount} 层${lockHint}。`
       : state.realFullCount > 0
-        ? `真实楼层 ${state.realFullCount}；柚月面板会自动加载完整历史。`
-        : '点击手动读取完整历史。';
+        ? `真实楼层 ${state.realFullCount}；柚月面板会自动加载完整历史${lockHint}。`
+        : `点击手动读取完整历史${lockHint}。`;
   }
 
   function ensureButton() {
@@ -1041,7 +1304,7 @@
       const eventName = eventTypes[name];
       if (!eventName) continue;
 
-      const marker = `__yzmSafeGuardV061_${name}`;
+      const marker = `__yzmSafeGuardV062_${name}`;
       if (eventSource[marker]) continue;
 
       try {
@@ -1056,6 +1319,7 @@
             state.currentChatKey = '';
             setTimeout(() => {
               refreshRealCount({ patchPanel: true });
+        enforceClaudeContextLock({ silent: true, reason: 'visible-refresh' });
               queuePanelScan();
             }, 350);
             return;
@@ -1078,6 +1342,7 @@
     ensureBanner();
     installActionAutoBridge();
     installGenerationReleaseGuard();
+    enforceClaudeContextLock({ silent: true, reason: 'health-check' });
     installEventHooks();
     patchYuzukiPanelCount();
   }
@@ -1091,6 +1356,7 @@
     ensureBanner();
     installActionAutoBridge();
     installGenerationReleaseGuard();
+    getOpenAIModule().then(() => enforceClaudeContextLock({ silent: true, reason: 'startup' }));
     installPanelObserver();
     startBridgeMonitor();
 
@@ -1102,7 +1368,7 @@
         clearInterval(boot);
         toast(
           'success',
-          `v${VERSION} 已启用：真实楼层常驻；普通回复生成前会强制释放全量历史桥。`,
+          `v${VERSION} 已启用：真实楼层常驻；Claude 上下文运行时锁定为 800,000。`,
           8500,
         );
       }
@@ -1122,6 +1388,7 @@
 
     globalThis.addEventListener('focus', () => {
       healthCheck();
+      enforceClaudeContextLock({ silent: true, reason: 'window-focus' });
       refreshRealCount({ patchPanel: true });
       queuePanelScan();
     }, { passive: true });
@@ -1129,6 +1396,7 @@
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') {
         healthCheck();
+        enforceClaudeContextLock({ silent: true, reason: 'visibility-return' });
         refreshRealCount({ patchPanel: true });
         queuePanelScan();
       }

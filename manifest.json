@@ -9,8 +9,8 @@
   "js": "index.js",
   "css": "style.css",
   "author": "Krystal & 顾星野",
-  "version": "0.6.1",
-  "description": "安全热修复：保留真实楼层与面板自动同步；普通发送、重生成、继续及回车生成前强制释放全量历史桥，避免完整聊天被塞进主模型请求导致百万 token。",
+  "version": "0.6.2",
+  "description": "新增 Claude 80 万上下文运行时安全锁：即使 TT 2.1.1 界面跳回 200 万，发送、继续、重生成和 Swipe 前也会自动压回 800000；保留真实楼层与面板自动同步。",
   "homePage": "https://github.com/1194555879-cmd/yuzuki-memory-safe-guard",
   "auto_update": true,
   "minimum_client_version": "1.18.0"

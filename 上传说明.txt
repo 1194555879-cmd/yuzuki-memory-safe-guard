@@ -1,4 +1,4 @@
-柚月护栏 v0.6.1 上传说明
+柚月护栏 v0.6.2 上传说明
 
 覆盖上传：
 1. index.js
@@ -7,7 +7,11 @@
 4. README.md
 
 Commit 可写：
-v0.6.1: prevent full-history bridge from leaking into normal generation
+v0.6.2: lock Claude context to 800k before generation
 
-更新后必须彻底退出 TauriTavern 再重开。
-后台自动总结、自动填表继续关闭。
+更新后：
+1. TauriTavern 扩展管理 → 更新
+2. 彻底退出 App → 重开
+3. 进入 Claude 聊天
+4. 即使设置页又显示 2000000，也先不要反复保存
+5. 发一条短测试消息；护栏会在发送前自动锁到 800000
