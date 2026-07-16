@@ -2,8 +2,8 @@
   'use strict';
 
   const MODULE = 'YuzukiMemorySafeGuard';
-  const VERSION = '0.7.0-beta.1';
-  const PATCHED = Symbol.for('yzm.safe.guard.patched.v070b1');
+  const VERSION = '0.7.0-beta.2';
+  const PATCHED = Symbol.for('yzm.safe.guard.patched.v070b2');
   const SENTINEL_FLAG = '__yzm_safe_boundary_sentinel__';
 
   const state = {
@@ -742,8 +742,8 @@
   }
 
   function installActionAutoBridge() {
-    if (document.__yzmSafeAutoBridgeInstalledV070B1) return;
-    document.__yzmSafeAutoBridgeInstalledV070B1 = true;
+    if (document.__yzmSafeAutoBridgeInstalledV070B2) return;
+    document.__yzmSafeAutoBridgeInstalledV070B2 = true;
 
     document.addEventListener(
       'click',
@@ -898,6 +898,40 @@
     }
   }
 
+
+  function normalizeAutoTaskSandbox() {
+    if (!Array.isArray(state.fullMessages)) return;
+
+    // 手动追溯使用的边界占位符位于数组最后。
+    // 柚月自动调度器会检查“最后一条是否为 assistant”；
+    // 若保留该 system 占位符，它会误以为当前不是角色回复，从而永远不启动自动总结。
+    while (state.fullMessages.at(-1)?.[SENTINEL_FLAG]) {
+      state.fullMessages.pop();
+    }
+
+    rememberDialogue(state.fullMessages);
+  }
+
+  function armAutoBridgeWindow(reason, status, token = state.autoBridgeToken) {
+    normalizeAutoTaskSandbox();
+
+    state.bridgeOwner = 'auto-task';
+    state.autoBridgeReadyAt = Date.now();
+    state.autoBridgeTaskSeen = false;
+    state.autoBridgeLastBusyAt = 0;
+    state.autoBridgeMaxUntil = Date.now() + 2 * 60 * 1000;
+    touchBridgeLease(2 * 60 * 1000);
+
+    console.info(`[${MODULE}] 自动任务一次性完整历史已就绪`, {
+      reason,
+      total: state.realFullCount,
+      visibleMessages: state.fullMessages.length,
+      status,
+    });
+
+    startAutoBridgeWatch(token);
+  }
+
   function startAutoBridgeWatch(token) {
     if (state.autoBridgeWatchTimer) clearInterval(state.autoBridgeWatchTimer);
 
@@ -962,16 +996,34 @@
       return;
     }
 
-    if (state.autoBridgePrepareTimer) clearTimeout(state.autoBridgePrepareTimer);
+    // MESSAGE_RECEIVED / GENERATION_ENDED / CHARACTER_MESSAGE_RENDERED
+    // 往往会在很短时间内连续出现。已有准备或已启用时不得反复重置，
+    // 否则会把柚月自己的 300ms/800ms 调度窗口打断。
+    if (state.bridgeActive && state.bridgeOwner === 'auto-task') {
+      normalizeAutoTaskSandbox();
+      touchBridgeLease(2 * 60 * 1000);
+      return;
+    }
+
+    if (state.autoBridgePrepareTimer || state.loading) {
+      return;
+    }
+
+    // 若面板已经建立完整历史桥，直接把现成快照转交给自动任务。
+    if (state.bridgeActive && Array.isArray(state.fullMessages)) {
+      const token = ++state.autoBridgeToken;
+      armAutoBridgeWindow(reason, status, token);
+      return;
+    }
+
     const token = ++state.autoBridgeToken;
 
     state.autoBridgePrepareTimer = setTimeout(async () => {
       state.autoBridgePrepareTimer = null;
       if (token !== state.autoBridgeToken) return;
 
-      // 柚月的调度器把 window.isSummarizing 当作“插件忙碌”信号。
-      // 在完整历史尚未准备好时临时置忙，迫使它延期 2 秒重试，
-      // 从而不会抢先按 TT 的 50 条窗口计算任务范围。
+      // 柚月真正执行任务前会检查 window.isSummarizing。
+      // 读取完整历史期间临时置忙，避免它在快照尚未完成时开始请求。
       state.autoBridgePreparingFlagOwner = globalThis.isSummarizing === true;
       try {
         globalThis.isSummarizing = true;
@@ -1003,21 +1055,8 @@
         return;
       }
 
-      state.bridgeOwner = 'auto-task';
-      state.autoBridgeReadyAt = Date.now();
-      state.autoBridgeTaskSeen = false;
-      state.autoBridgeLastBusyAt = 0;
-      state.autoBridgeMaxUntil = Date.now() + 2 * 60 * 1000;
-      touchBridgeLease(2 * 60 * 1000);
-
-      console.info(`[${MODULE}] 自动任务一次性完整历史已就绪`, {
-        reason,
-        total: state.realFullCount,
-        status,
-      });
-
-      startAutoBridgeWatch(token);
-    }, 120);
+      armAutoBridgeWindow(reason, status, token);
+    }, 40);
   }
 
   function getOpenAIModule() {
@@ -1226,8 +1265,8 @@
   }
 
   function installGenerationReleaseGuard() {
-    if (document.__yzmSafeGenerationReleaseInstalledV070B1) return;
-    document.__yzmSafeGenerationReleaseInstalledV070B1 = true;
+    if (document.__yzmSafeGenerationReleaseInstalledV070B2) return;
+    document.__yzmSafeGenerationReleaseInstalledV070B2 = true;
 
     const releaseOnPointer = event => {
       if (getNormalGenerationControl(event.target)) {
@@ -1575,7 +1614,7 @@
       const eventName = eventTypes[name];
       if (!eventName) continue;
 
-      const marker = `__yzmSafeGuardV070B1_${name}`;
+      const marker = `__yzmSafeGuardV070B2_${name}`;
       if (eventSource[marker]) continue;
 
       try {
@@ -1614,16 +1653,12 @@
           }
 
           if (
+            name === 'MESSAGE_RECEIVED' ||
             name === 'GENERATION_ENDED' ||
             name === 'CHARACTER_MESSAGE_RENDERED'
           ) {
             refreshRealCount({ patchPanel: true });
             queueSafeAutomaticBridge(name.toLowerCase());
-            return;
-          }
-
-          if (name === 'MESSAGE_RECEIVED') {
-            refreshRealCount({ patchPanel: true });
             return;
           }
 
@@ -1670,7 +1705,7 @@
         clearInterval(boot);
         toast(
           'success',
-          `v${VERSION} 已启用：后台自动任务使用一次性完整历史；普通回复仍保持隔离。`,
+          `v${VERSION} 已启用：已修复自动调度被边界占位符拦住的问题。`,
           8500,
         );
       }
