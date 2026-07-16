@@ -1,4 +1,4 @@
-柚月护栏 v0.6.3 上传说明
+柚月护栏 v0.7.0-beta.1 上传说明
 
 覆盖上传：
 1. index.js
@@ -7,10 +7,14 @@
 4. README.md
 
 Commit 可写：
-v0.6.3: keep full-history bridge across Yuzuki batch runs
+v0.7.0-beta.1: isolate full history for Yuzuki automatic tasks
 
-更新并大退重开后：
-1. 保留现有总结，不要全量重跑
-2. 单独追溯 90 → 100
-3. 单独追溯 110 → 120
-4. 检查记忆总结里出现 90-99、110-119
+安装：
+1. TauriTavern 扩展管理 → 更新
+2. 彻底退出 App → 重新打开
+3. 导出测试聊天 JSONL
+4. 只开自动小总结，间隔 2～4，延迟 0～1，直接触发并自动保存
+5. 聊一轮后等待自动任务，验收成功再恢复日常间隔
+
+出现卡顿、白屏、百万 token 或错楼：
+立即关闭自动化并回退 v0.6.3。

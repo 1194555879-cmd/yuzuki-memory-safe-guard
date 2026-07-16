@@ -9,8 +9,8 @@
   "js": "index.js",
   "css": "style.css",
   "author": "Krystal & 顾星野",
-  "version": "0.6.3",
-  "description": "修复柚月批量总结隔批丢失完整历史：从第1批到最终批次全程保持全量桥，避免第2/4批误报“范围内无有效聊天内容”；保留Claude 80万安全锁。",
+  "version": "0.7.0-beta.1",
+  "description": "安全自动化 Beta：仅在角色回复结束后为柚月自动任务建立一次性完整历史窗口；准备期间迫使调度器延期，任务结束即释放，普通Claude回复发送前强制隔离。",
   "homePage": "https://github.com/1194555879-cmd/yuzuki-memory-safe-guard",
   "auto_update": true,
   "minimum_client_version": "1.18.0"

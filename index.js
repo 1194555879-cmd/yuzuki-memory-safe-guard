@@ -2,8 +2,8 @@
   'use strict';
 
   const MODULE = 'YuzukiMemorySafeGuard';
-  const VERSION = '0.6.3';
-  const PATCHED = Symbol.for('yzm.safe.guard.patched.v063');
+  const VERSION = '0.7.0-beta.1';
+  const PATCHED = Symbol.for('yzm.safe.guard.patched.v070b1');
   const SENTINEL_FLAG = '__yzm_safe_boundary_sentinel__';
 
   const state = {
@@ -40,6 +40,15 @@
     contextLockReplayGuard: false,
     contextLockLastToastAt: 0,
     contextLockApplied: false,
+    autoBridgePrepareTimer: null,
+    autoBridgeWatchTimer: null,
+    autoBridgeToken: 0,
+    autoBridgeReadyAt: 0,
+    autoBridgeTaskSeen: false,
+    autoBridgeLastBusyAt: 0,
+    autoBridgeMaxUntil: 0,
+    autoBridgeExplicitEnabled: false,
+    autoBridgePreparingFlagOwner: null,
   };
 
   function clone(value) {
@@ -733,8 +742,8 @@
   }
 
   function installActionAutoBridge() {
-    if (document.__yzmSafeAutoBridgeInstalledV063) return;
-    document.__yzmSafeAutoBridgeInstalledV063 = true;
+    if (document.__yzmSafeAutoBridgeInstalledV070B1) return;
+    document.__yzmSafeAutoBridgeInstalledV070B1 = true;
 
     document.addEventListener(
       'click',
@@ -795,6 +804,221 @@
   }
 
 
+
+
+  const AUTO_SUMMARY_SETTINGS_KEY = 'yzm_memory_global_auto_summary_settings';
+  const PLUGIN_SETTINGS_KEY = 'yzm_memory_global_plugin_settings';
+
+  function readYuzukiSetting(key, fallback = null) {
+    try {
+      const value = globalThis.YuzukiMemory?.GlobalSettings?.get?.(key, undefined);
+      if (value !== undefined) return value === null ? fallback : value;
+    } catch {}
+
+    try {
+      const raw = globalThis.localStorage?.getItem?.(key);
+      if (raw === null || raw === undefined || raw === '') return fallback;
+      return JSON.parse(raw);
+    } catch {
+      return fallback;
+    }
+  }
+
+  function getExplicitAutomationStatus() {
+    const auto = readYuzukiSetting(AUTO_SUMMARY_SETTINGS_KEY, null);
+    const plugin = readYuzukiSetting(PLUGIN_SETTINGS_KEY, null);
+
+    // Beta 只保护用户明确开启的开关，不采用柚月“缺省即开启”的默认值，
+    // 避免用户明明没开自动化，护栏仍在每轮读取完整历史。
+    const summaryEnabled = auto?.summaryEnabled === true;
+    const historyEnabled = auto?.historyEnabled === true;
+    const traceEnabled = Boolean(
+      plugin &&
+      plugin.enableFilling !== false &&
+      plugin.fillMode === 'batch' &&
+      plugin.traceBatchEnabled === true
+    );
+
+    return {
+      enabled: summaryEnabled || historyEnabled || traceEnabled,
+      summaryEnabled,
+      historyEnabled,
+      traceEnabled,
+    };
+  }
+
+  function cancelPendingYuzukiAutoTask(reason = 'guard-cancel') {
+    try {
+      globalThis.YuzukiMemory?.TaskRunner?.cancelPendingAutoTask?.();
+      console.info(`[${MODULE}] 已取消柚月待执行自动任务：${reason}`);
+      return true;
+    } catch (error) {
+      console.warn(`[${MODULE}] 取消柚月自动任务失败`, error);
+      return false;
+    }
+  }
+
+  function clearAutoBridgeTimers() {
+    if (state.autoBridgePrepareTimer) {
+      clearTimeout(state.autoBridgePrepareTimer);
+      state.autoBridgePrepareTimer = null;
+    }
+    if (state.autoBridgeWatchTimer) {
+      clearInterval(state.autoBridgeWatchTimer);
+      state.autoBridgeWatchTimer = null;
+    }
+  }
+
+  function restorePreparingBusyFlag() {
+    if (state.autoBridgePreparingFlagOwner === null) return;
+    try {
+      globalThis.isSummarizing = state.autoBridgePreparingFlagOwner;
+    } catch {}
+    state.autoBridgePreparingFlagOwner = null;
+  }
+
+  function stopAutoBridge({
+    reason = 'auto-finished',
+    cancelPending = false,
+    release = true,
+  } = {}) {
+    state.autoBridgeToken += 1;
+    clearAutoBridgeTimers();
+    restorePreparingBusyFlag();
+
+    state.autoBridgeReadyAt = 0;
+    state.autoBridgeTaskSeen = false;
+    state.autoBridgeLastBusyAt = 0;
+    state.autoBridgeMaxUntil = 0;
+
+    if (cancelPending) cancelPendingYuzukiAutoTask(reason);
+
+    if (release && state.bridgeOwner === 'auto-task') {
+      deactivateBridge({ silent: true, reason });
+    }
+  }
+
+  function startAutoBridgeWatch(token) {
+    if (state.autoBridgeWatchTimer) clearInterval(state.autoBridgeWatchTimer);
+
+    state.autoBridgeWatchTimer = setInterval(() => {
+      if (token !== state.autoBridgeToken) {
+        clearAutoBridgeTimers();
+        return;
+      }
+
+      if (!state.bridgeActive || state.bridgeOwner !== 'auto-task') {
+        stopAutoBridge({ reason: 'auto-bridge-lost', release: false });
+        return;
+      }
+
+      const now = Date.now();
+      const busy = globalThis.isSummarizing === true;
+
+      if (busy) {
+        state.autoBridgeTaskSeen = true;
+        state.autoBridgeLastBusyAt = now;
+        touchBridgeLease(2 * 60 * 1000);
+        return;
+      }
+
+      // 没有任务达到阈值：柚月通常在 0.8 秒左右检查一次。
+      // 给它及一次“忙碌后重试”留足时间，然后释放。
+      if (!state.autoBridgeTaskSeen && now - state.autoBridgeReadyAt > 8000) {
+        stopAutoBridge({ reason: 'auto-no-task-due' });
+        return;
+      }
+
+      // 任务完成后保留 6 秒，覆盖自动回填的下一项任务（柚月约 2.5 秒后补跑）。
+      if (
+        state.autoBridgeTaskSeen &&
+        state.autoBridgeLastBusyAt > 0 &&
+        now - state.autoBridgeLastBusyAt > 6000
+      ) {
+        stopAutoBridge({ reason: 'auto-task-finished' });
+        return;
+      }
+
+      if (state.autoBridgeMaxUntil && now > state.autoBridgeMaxUntil) {
+        stopAutoBridge({
+          reason: 'auto-task-timeout',
+          cancelPending: true,
+        });
+        toast(
+          'warning',
+          '自动任务安全窗口已超时并关闭；本轮未继续持有完整历史。',
+          7000,
+        );
+      }
+    }, 350);
+  }
+
+  function queueSafeAutomaticBridge(reason = 'generation-ended') {
+    const status = getExplicitAutomationStatus();
+    state.autoBridgeExplicitEnabled = status.enabled;
+
+    if (!status.enabled) {
+      stopAutoBridge({ reason: 'automation-disabled' });
+      return;
+    }
+
+    if (state.autoBridgePrepareTimer) clearTimeout(state.autoBridgePrepareTimer);
+    const token = ++state.autoBridgeToken;
+
+    state.autoBridgePrepareTimer = setTimeout(async () => {
+      state.autoBridgePrepareTimer = null;
+      if (token !== state.autoBridgeToken) return;
+
+      // 柚月的调度器把 window.isSummarizing 当作“插件忙碌”信号。
+      // 在完整历史尚未准备好时临时置忙，迫使它延期 2 秒重试，
+      // 从而不会抢先按 TT 的 50 条窗口计算任务范围。
+      state.autoBridgePreparingFlagOwner = globalThis.isSummarizing === true;
+      try {
+        globalThis.isSummarizing = true;
+      } catch {}
+
+      const ok = await activateBridge({
+        silent: true,
+        force: true,
+        reason: `auto-safe-${reason}`,
+        owner: 'auto-task',
+      });
+
+      restorePreparingBusyFlag();
+
+      if (token !== state.autoBridgeToken) {
+        if (state.bridgeOwner === 'auto-task') {
+          deactivateBridge({ silent: true, reason: 'auto-stale-prepare' });
+        }
+        return;
+      }
+
+      if (!ok) {
+        cancelPendingYuzukiAutoTask('full-history-load-failed');
+        toast(
+          'error',
+          '完整历史读取失败，本轮柚月自动任务已取消，避免按 50 层残缺上下文运行。',
+          12000,
+        );
+        return;
+      }
+
+      state.bridgeOwner = 'auto-task';
+      state.autoBridgeReadyAt = Date.now();
+      state.autoBridgeTaskSeen = false;
+      state.autoBridgeLastBusyAt = 0;
+      state.autoBridgeMaxUntil = Date.now() + 2 * 60 * 1000;
+      touchBridgeLease(2 * 60 * 1000);
+
+      console.info(`[${MODULE}] 自动任务一次性完整历史已就绪`, {
+        reason,
+        total: state.realFullCount,
+        status,
+      });
+
+      startAutoBridgeWatch(token);
+    }, 120);
+  }
 
   function getOpenAIModule() {
     if (state.openAIModule) return Promise.resolve(state.openAIModule);
@@ -987,15 +1211,23 @@
   }
 
   function releaseBeforeNormalGeneration(reason = 'normal-generation') {
-    if (!state.bridgeActive && !state.loading) return;
-    deactivateBridge({ silent: true, reason });
+    stopAutoBridge({
+      reason: `normal-${reason}`,
+      cancelPending: true,
+      release: false,
+    });
+
+    if (state.bridgeActive || state.loading) {
+      deactivateBridge({ silent: true, reason });
+    }
+
     hideBanner();
     console.info(`[${MODULE}] 已在普通对话生成前释放完整历史桥：${reason}`);
   }
 
   function installGenerationReleaseGuard() {
-    if (document.__yzmSafeGenerationReleaseInstalledV063) return;
-    document.__yzmSafeGenerationReleaseInstalledV063 = true;
+    if (document.__yzmSafeGenerationReleaseInstalledV070B1) return;
+    document.__yzmSafeGenerationReleaseInstalledV070B1 = true;
 
     const releaseOnPointer = event => {
       if (getNormalGenerationControl(event.target)) {
@@ -1135,12 +1367,15 @@
     const lockHint = contextLockStatusSync().claude
       ? `；Claude 上下文安全锁 ${state.claudeContextLimit.toLocaleString()}`
       : '';
+    const autoHint = state.autoBridgeExplicitEnabled
+      ? '；后台自动任务一次性历史保护已开启'
+      : '';
 
     button.title = state.bridgeActive
-      ? `完整历史已启用，共 ${state.realFullCount} 层${lockHint}。`
+      ? `完整历史已启用，共 ${state.realFullCount} 层${lockHint}${autoHint}。`
       : state.realFullCount > 0
-        ? `真实楼层 ${state.realFullCount}；柚月面板会自动加载完整历史${lockHint}。`
-        : `点击手动读取完整历史${lockHint}。`;
+        ? `真实楼层 ${state.realFullCount}；柚月面板会自动加载完整历史${lockHint}${autoHint}。`
+        : `点击手动读取完整历史${lockHint}${autoHint}。`;
   }
 
   function ensureButton() {
@@ -1270,6 +1505,12 @@
 
       if (!state.bridgeActive) return;
 
+      // 后台自动任务由更精细的 350ms 监视器管理。
+      // 通用监视器不得因为面板关闭而把它提前释放。
+      if (state.bridgeOwner === 'auto-task') {
+        return;
+      }
+
       const batchSessionActive = isYuzukiBatchSessionActive();
 
       if (batchSessionActive) {
@@ -1327,13 +1568,14 @@
       'MESSAGE_EDITED',
       'MESSAGE_DELETED',
       'GENERATION_ENDED',
+      'CHARACTER_MESSAGE_RENDERED',
     ];
 
     for (const name of eventNames) {
       const eventName = eventTypes[name];
       if (!eventName) continue;
 
-      const marker = `__yzmSafeGuardV063_${name}`;
+      const marker = `__yzmSafeGuardV070B1_${name}`;
       if (eventSource[marker]) continue;
 
       try {
@@ -1343,14 +1585,45 @@
           patchSaveHooks();
 
           if (name === 'CHAT_CHANGED') {
+            stopAutoBridge({
+              reason: 'chat-changed',
+              cancelPending: true,
+              release: false,
+            });
             deactivateBridge({ silent: true, reason: 'chat-changed' });
             state.realFullCount = 0;
             state.currentChatKey = '';
             setTimeout(() => {
               refreshRealCount({ patchPanel: true });
-        enforceClaudeContextLock({ silent: true, reason: 'visible-refresh' });
+              enforceClaudeContextLock({ silent: true, reason: 'chat-changed' });
               queuePanelScan();
             }, 350);
+            return;
+          }
+
+          if (name === 'MESSAGE_SENT') {
+            // 用户开始下一轮时，上一轮自动任务窗口必须立即结束。
+            stopAutoBridge({
+              reason: 'new-user-message',
+              cancelPending: true,
+              release: false,
+            });
+            deactivateBridge({ silent: true, reason: 'new-user-message' });
+            refreshRealCount({ patchPanel: true });
+            return;
+          }
+
+          if (
+            name === 'GENERATION_ENDED' ||
+            name === 'CHARACTER_MESSAGE_RENDERED'
+          ) {
+            refreshRealCount({ patchPanel: true });
+            queueSafeAutomaticBridge(name.toLowerCase());
+            return;
+          }
+
+          if (name === 'MESSAGE_RECEIVED') {
+            refreshRealCount({ patchPanel: true });
             return;
           }
 
@@ -1397,7 +1670,7 @@
         clearInterval(boot);
         toast(
           'success',
-          `v${VERSION} 已启用：批量任务全程保持完整历史；Claude 上下文锁定为 800,000。`,
+          `v${VERSION} 已启用：后台自动任务使用一次性完整历史；普通回复仍保持隔离。`,
           8500,
         );
       }
@@ -1439,6 +1712,9 @@
     refreshRealCount,
     sanitizeRealChat,
     healthCheck,
+    queueSafeAutomaticBridge,
+    stopAutoBridge,
+    getExplicitAutomationStatus,
   };
 
   if (document.readyState === 'loading') {
