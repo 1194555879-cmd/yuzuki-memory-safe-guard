@@ -2,8 +2,8 @@
   'use strict';
 
   const MODULE = 'YuzukiMemorySafeGuard';
-  const VERSION = '0.6.2';
-  const PATCHED = Symbol.for('yzm.safe.guard.patched.v062');
+  const VERSION = '0.6.3';
+  const PATCHED = Symbol.for('yzm.safe.guard.patched.v063');
   const SENTINEL_FLAG = '__yzm_safe_boundary_sentinel__';
 
   const state = {
@@ -700,6 +700,24 @@
     );
   }
 
+  function isYuzukiBatchSessionActive() {
+    const bodyText = String(document.body?.innerText || '').replace(/\s+/g, '');
+
+    if (
+      /当前批次\d+\/\d+/.test(bodyText) ||
+      /第\d+批执行失败/.test(bodyText)
+    ) {
+      return true;
+    }
+
+    const texts = visibleButtonTexts();
+    const hasBatchControl = texts.some(text =>
+      /(继续后续批次|重试本批|停止任务)/.test(text),
+    );
+
+    return hasBatchControl && /批次/.test(bodyText);
+  }
+
   function isYuzukiAction(target) {
     const element = target?.closest?.(
       'button,[role="button"],input[type="button"],input[type="submit"]',
@@ -715,8 +733,8 @@
   }
 
   function installActionAutoBridge() {
-    if (document.__yzmSafeAutoBridgeInstalledV062) return;
-    document.__yzmSafeAutoBridgeInstalledV062 = true;
+    if (document.__yzmSafeAutoBridgeInstalledV063) return;
+    document.__yzmSafeAutoBridgeInstalledV063 = true;
 
     document.addEventListener(
       'click',
@@ -733,7 +751,7 @@
         if (state.bridgeActive) {
           state.bridgeOwner = 'task';
           state.taskSeenRunning = true;
-          touchBridgeLease();
+          touchBridgeLease(30 * 60 * 1000);
           return;
         }
 
@@ -765,7 +783,7 @@
         try {
           await sleep(160);
           element.click();
-          touchBridgeLease();
+          touchBridgeLease(30 * 60 * 1000);
         } finally {
           setTimeout(() => {
             state.taskReplayGuard = false;
@@ -976,8 +994,8 @@
   }
 
   function installGenerationReleaseGuard() {
-    if (document.__yzmSafeGenerationReleaseInstalledV062) return;
-    document.__yzmSafeGenerationReleaseInstalledV062 = true;
+    if (document.__yzmSafeGenerationReleaseInstalledV063) return;
+    document.__yzmSafeGenerationReleaseInstalledV063 = true;
 
     const releaseOnPointer = event => {
       if (getNormalGenerationControl(event.target)) {
@@ -1252,10 +1270,21 @@
 
       if (!state.bridgeActive) return;
 
+      const batchSessionActive = isYuzukiBatchSessionActive();
+
+      if (batchSessionActive) {
+        // 批量任务会在批次之间短暂退出“执行中”状态。
+        // 此时绝不能释放完整历史，否则下一批会退回 TT 的 50 条窗口。
+        state.taskSeenRunning = true;
+        state.bridgeOwner = 'task';
+        touchBridgeLease(30 * 60 * 1000);
+        return;
+      }
+
       if (isYuzukiTaskRunning()) {
         state.taskSeenRunning = true;
         state.bridgeOwner = 'task';
-        touchBridgeLease();
+        touchBridgeLease(30 * 60 * 1000);
         return;
       }
 
@@ -1281,7 +1310,7 @@
       if (state.bridgeReleaseDeadline && now > state.bridgeReleaseDeadline) {
         deactivateBridge({ silent: true, reason: 'lease-timeout' });
       }
-    }, 1800);
+    }, 1200);
   }
 
   function installEventHooks() {
@@ -1304,7 +1333,7 @@
       const eventName = eventTypes[name];
       if (!eventName) continue;
 
-      const marker = `__yzmSafeGuardV062_${name}`;
+      const marker = `__yzmSafeGuardV063_${name}`;
       if (eventSource[marker]) continue;
 
       try {
@@ -1368,7 +1397,7 @@
         clearInterval(boot);
         toast(
           'success',
-          `v${VERSION} 已启用：真实楼层常驻；Claude 上下文运行时锁定为 800,000。`,
+          `v${VERSION} 已启用：批量任务全程保持完整历史；Claude 上下文锁定为 800,000。`,
           8500,
         );
       }

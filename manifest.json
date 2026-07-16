@@ -9,8 +9,8 @@
   "js": "index.js",
   "css": "style.css",
   "author": "Krystal & 顾星野",
-  "version": "0.6.2",
-  "description": "新增 Claude 80 万上下文运行时安全锁：即使 TT 2.1.1 界面跳回 200 万，发送、继续、重生成和 Swipe 前也会自动压回 800000；保留真实楼层与面板自动同步。",
+  "version": "0.6.3",
+  "description": "修复柚月批量总结隔批丢失完整历史：从第1批到最终批次全程保持全量桥，避免第2/4批误报“范围内无有效聊天内容”；保留Claude 80万安全锁。",
   "homePage": "https://github.com/1194555879-cmd/yuzuki-memory-safe-guard",
   "auto_update": true,
   "minimum_client_version": "1.18.0"

@@ -1,4 +1,4 @@
-柚月护栏 v0.6.2 上传说明
+柚月护栏 v0.6.3 上传说明
 
 覆盖上传：
 1. index.js
@@ -7,11 +7,10 @@
 4. README.md
 
 Commit 可写：
-v0.6.2: lock Claude context to 800k before generation
+v0.6.3: keep full-history bridge across Yuzuki batch runs
 
-更新后：
-1. TauriTavern 扩展管理 → 更新
-2. 彻底退出 App → 重开
-3. 进入 Claude 聊天
-4. 即使设置页又显示 2000000，也先不要反复保存
-5. 发一条短测试消息；护栏会在发送前自动锁到 800000
+更新并大退重开后：
+1. 保留现有总结，不要全量重跑
+2. 单独追溯 90 → 100
+3. 单独追溯 110 → 120
+4. 检查记忆总结里出现 90-99、110-119
