@@ -9,8 +9,8 @@
   "js": "index.js",
   "css": "style.css",
   "author": "Krystal & 顾星野",
-  "version": "0.7.0-beta.2",
-  "description": "修复自动总结不触发：自动任务快照不再把 system 边界占位符放在末尾；从 MESSAGE_RECEIVED 提前准备完整历史，并合并连续生成事件，避免反复重置调度。",
+  "version": "0.6.3",
+  "description": "修复柚月批量总结隔批丢失完整历史：从第1批到最终批次全程保持全量桥，避免第2/4批误报“范围内无有效聊天内容”；保留Claude 80万安全锁。",
   "homePage": "https://github.com/1194555879-cmd/yuzuki-memory-safe-guard",
   "auto_update": true,
   "minimum_client_version": "1.18.0"

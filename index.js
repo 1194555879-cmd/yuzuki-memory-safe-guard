@@ -2,8 +2,8 @@
   'use strict';
 
   const MODULE = 'YuzukiMemorySafeGuard';
-  const VERSION = '0.7.0-beta.2';
-  const PATCHED = Symbol.for('yzm.safe.guard.patched.v070b2');
+  const VERSION = '0.6.3';
+  const PATCHED = Symbol.for('yzm.safe.guard.patched.v063');
   const SENTINEL_FLAG = '__yzm_safe_boundary_sentinel__';
 
   const state = {
@@ -40,15 +40,6 @@
     contextLockReplayGuard: false,
     contextLockLastToastAt: 0,
     contextLockApplied: false,
-    autoBridgePrepareTimer: null,
-    autoBridgeWatchTimer: null,
-    autoBridgeToken: 0,
-    autoBridgeReadyAt: 0,
-    autoBridgeTaskSeen: false,
-    autoBridgeLastBusyAt: 0,
-    autoBridgeMaxUntil: 0,
-    autoBridgeExplicitEnabled: false,
-    autoBridgePreparingFlagOwner: null,
   };
 
   function clone(value) {
@@ -742,8 +733,8 @@
   }
 
   function installActionAutoBridge() {
-    if (document.__yzmSafeAutoBridgeInstalledV070B2) return;
-    document.__yzmSafeAutoBridgeInstalledV070B2 = true;
+    if (document.__yzmSafeAutoBridgeInstalledV063) return;
+    document.__yzmSafeAutoBridgeInstalledV063 = true;
 
     document.addEventListener(
       'click',
@@ -804,260 +795,6 @@
   }
 
 
-
-
-  const AUTO_SUMMARY_SETTINGS_KEY = 'yzm_memory_global_auto_summary_settings';
-  const PLUGIN_SETTINGS_KEY = 'yzm_memory_global_plugin_settings';
-
-  function readYuzukiSetting(key, fallback = null) {
-    try {
-      const value = globalThis.YuzukiMemory?.GlobalSettings?.get?.(key, undefined);
-      if (value !== undefined) return value === null ? fallback : value;
-    } catch {}
-
-    try {
-      const raw = globalThis.localStorage?.getItem?.(key);
-      if (raw === null || raw === undefined || raw === '') return fallback;
-      return JSON.parse(raw);
-    } catch {
-      return fallback;
-    }
-  }
-
-  function getExplicitAutomationStatus() {
-    const auto = readYuzukiSetting(AUTO_SUMMARY_SETTINGS_KEY, null);
-    const plugin = readYuzukiSetting(PLUGIN_SETTINGS_KEY, null);
-
-    // Beta 只保护用户明确开启的开关，不采用柚月“缺省即开启”的默认值，
-    // 避免用户明明没开自动化，护栏仍在每轮读取完整历史。
-    const summaryEnabled = auto?.summaryEnabled === true;
-    const historyEnabled = auto?.historyEnabled === true;
-    const traceEnabled = Boolean(
-      plugin &&
-      plugin.enableFilling !== false &&
-      plugin.fillMode === 'batch' &&
-      plugin.traceBatchEnabled === true
-    );
-
-    return {
-      enabled: summaryEnabled || historyEnabled || traceEnabled,
-      summaryEnabled,
-      historyEnabled,
-      traceEnabled,
-    };
-  }
-
-  function cancelPendingYuzukiAutoTask(reason = 'guard-cancel') {
-    try {
-      globalThis.YuzukiMemory?.TaskRunner?.cancelPendingAutoTask?.();
-      console.info(`[${MODULE}] 已取消柚月待执行自动任务：${reason}`);
-      return true;
-    } catch (error) {
-      console.warn(`[${MODULE}] 取消柚月自动任务失败`, error);
-      return false;
-    }
-  }
-
-  function clearAutoBridgeTimers() {
-    if (state.autoBridgePrepareTimer) {
-      clearTimeout(state.autoBridgePrepareTimer);
-      state.autoBridgePrepareTimer = null;
-    }
-    if (state.autoBridgeWatchTimer) {
-      clearInterval(state.autoBridgeWatchTimer);
-      state.autoBridgeWatchTimer = null;
-    }
-  }
-
-  function restorePreparingBusyFlag() {
-    if (state.autoBridgePreparingFlagOwner === null) return;
-    try {
-      globalThis.isSummarizing = state.autoBridgePreparingFlagOwner;
-    } catch {}
-    state.autoBridgePreparingFlagOwner = null;
-  }
-
-  function stopAutoBridge({
-    reason = 'auto-finished',
-    cancelPending = false,
-    release = true,
-  } = {}) {
-    state.autoBridgeToken += 1;
-    clearAutoBridgeTimers();
-    restorePreparingBusyFlag();
-
-    state.autoBridgeReadyAt = 0;
-    state.autoBridgeTaskSeen = false;
-    state.autoBridgeLastBusyAt = 0;
-    state.autoBridgeMaxUntil = 0;
-
-    if (cancelPending) cancelPendingYuzukiAutoTask(reason);
-
-    if (release && state.bridgeOwner === 'auto-task') {
-      deactivateBridge({ silent: true, reason });
-    }
-  }
-
-
-  function normalizeAutoTaskSandbox() {
-    if (!Array.isArray(state.fullMessages)) return;
-
-    // 手动追溯使用的边界占位符位于数组最后。
-    // 柚月自动调度器会检查“最后一条是否为 assistant”；
-    // 若保留该 system 占位符，它会误以为当前不是角色回复，从而永远不启动自动总结。
-    while (state.fullMessages.at(-1)?.[SENTINEL_FLAG]) {
-      state.fullMessages.pop();
-    }
-
-    rememberDialogue(state.fullMessages);
-  }
-
-  function armAutoBridgeWindow(reason, status, token = state.autoBridgeToken) {
-    normalizeAutoTaskSandbox();
-
-    state.bridgeOwner = 'auto-task';
-    state.autoBridgeReadyAt = Date.now();
-    state.autoBridgeTaskSeen = false;
-    state.autoBridgeLastBusyAt = 0;
-    state.autoBridgeMaxUntil = Date.now() + 2 * 60 * 1000;
-    touchBridgeLease(2 * 60 * 1000);
-
-    console.info(`[${MODULE}] 自动任务一次性完整历史已就绪`, {
-      reason,
-      total: state.realFullCount,
-      visibleMessages: state.fullMessages.length,
-      status,
-    });
-
-    startAutoBridgeWatch(token);
-  }
-
-  function startAutoBridgeWatch(token) {
-    if (state.autoBridgeWatchTimer) clearInterval(state.autoBridgeWatchTimer);
-
-    state.autoBridgeWatchTimer = setInterval(() => {
-      if (token !== state.autoBridgeToken) {
-        clearAutoBridgeTimers();
-        return;
-      }
-
-      if (!state.bridgeActive || state.bridgeOwner !== 'auto-task') {
-        stopAutoBridge({ reason: 'auto-bridge-lost', release: false });
-        return;
-      }
-
-      const now = Date.now();
-      const busy = globalThis.isSummarizing === true;
-
-      if (busy) {
-        state.autoBridgeTaskSeen = true;
-        state.autoBridgeLastBusyAt = now;
-        touchBridgeLease(2 * 60 * 1000);
-        return;
-      }
-
-      // 没有任务达到阈值：柚月通常在 0.8 秒左右检查一次。
-      // 给它及一次“忙碌后重试”留足时间，然后释放。
-      if (!state.autoBridgeTaskSeen && now - state.autoBridgeReadyAt > 8000) {
-        stopAutoBridge({ reason: 'auto-no-task-due' });
-        return;
-      }
-
-      // 任务完成后保留 6 秒，覆盖自动回填的下一项任务（柚月约 2.5 秒后补跑）。
-      if (
-        state.autoBridgeTaskSeen &&
-        state.autoBridgeLastBusyAt > 0 &&
-        now - state.autoBridgeLastBusyAt > 6000
-      ) {
-        stopAutoBridge({ reason: 'auto-task-finished' });
-        return;
-      }
-
-      if (state.autoBridgeMaxUntil && now > state.autoBridgeMaxUntil) {
-        stopAutoBridge({
-          reason: 'auto-task-timeout',
-          cancelPending: true,
-        });
-        toast(
-          'warning',
-          '自动任务安全窗口已超时并关闭；本轮未继续持有完整历史。',
-          7000,
-        );
-      }
-    }, 350);
-  }
-
-  function queueSafeAutomaticBridge(reason = 'generation-ended') {
-    const status = getExplicitAutomationStatus();
-    state.autoBridgeExplicitEnabled = status.enabled;
-
-    if (!status.enabled) {
-      stopAutoBridge({ reason: 'automation-disabled' });
-      return;
-    }
-
-    // MESSAGE_RECEIVED / GENERATION_ENDED / CHARACTER_MESSAGE_RENDERED
-    // 往往会在很短时间内连续出现。已有准备或已启用时不得反复重置，
-    // 否则会把柚月自己的 300ms/800ms 调度窗口打断。
-    if (state.bridgeActive && state.bridgeOwner === 'auto-task') {
-      normalizeAutoTaskSandbox();
-      touchBridgeLease(2 * 60 * 1000);
-      return;
-    }
-
-    if (state.autoBridgePrepareTimer || state.loading) {
-      return;
-    }
-
-    // 若面板已经建立完整历史桥，直接把现成快照转交给自动任务。
-    if (state.bridgeActive && Array.isArray(state.fullMessages)) {
-      const token = ++state.autoBridgeToken;
-      armAutoBridgeWindow(reason, status, token);
-      return;
-    }
-
-    const token = ++state.autoBridgeToken;
-
-    state.autoBridgePrepareTimer = setTimeout(async () => {
-      state.autoBridgePrepareTimer = null;
-      if (token !== state.autoBridgeToken) return;
-
-      // 柚月真正执行任务前会检查 window.isSummarizing。
-      // 读取完整历史期间临时置忙，避免它在快照尚未完成时开始请求。
-      state.autoBridgePreparingFlagOwner = globalThis.isSummarizing === true;
-      try {
-        globalThis.isSummarizing = true;
-      } catch {}
-
-      const ok = await activateBridge({
-        silent: true,
-        force: true,
-        reason: `auto-safe-${reason}`,
-        owner: 'auto-task',
-      });
-
-      restorePreparingBusyFlag();
-
-      if (token !== state.autoBridgeToken) {
-        if (state.bridgeOwner === 'auto-task') {
-          deactivateBridge({ silent: true, reason: 'auto-stale-prepare' });
-        }
-        return;
-      }
-
-      if (!ok) {
-        cancelPendingYuzukiAutoTask('full-history-load-failed');
-        toast(
-          'error',
-          '完整历史读取失败，本轮柚月自动任务已取消，避免按 50 层残缺上下文运行。',
-          12000,
-        );
-        return;
-      }
-
-      armAutoBridgeWindow(reason, status, token);
-    }, 40);
-  }
 
   function getOpenAIModule() {
     if (state.openAIModule) return Promise.resolve(state.openAIModule);
@@ -1250,23 +987,15 @@
   }
 
   function releaseBeforeNormalGeneration(reason = 'normal-generation') {
-    stopAutoBridge({
-      reason: `normal-${reason}`,
-      cancelPending: true,
-      release: false,
-    });
-
-    if (state.bridgeActive || state.loading) {
-      deactivateBridge({ silent: true, reason });
-    }
-
+    if (!state.bridgeActive && !state.loading) return;
+    deactivateBridge({ silent: true, reason });
     hideBanner();
     console.info(`[${MODULE}] 已在普通对话生成前释放完整历史桥：${reason}`);
   }
 
   function installGenerationReleaseGuard() {
-    if (document.__yzmSafeGenerationReleaseInstalledV070B2) return;
-    document.__yzmSafeGenerationReleaseInstalledV070B2 = true;
+    if (document.__yzmSafeGenerationReleaseInstalledV063) return;
+    document.__yzmSafeGenerationReleaseInstalledV063 = true;
 
     const releaseOnPointer = event => {
       if (getNormalGenerationControl(event.target)) {
@@ -1406,15 +1135,12 @@
     const lockHint = contextLockStatusSync().claude
       ? `；Claude 上下文安全锁 ${state.claudeContextLimit.toLocaleString()}`
       : '';
-    const autoHint = state.autoBridgeExplicitEnabled
-      ? '；后台自动任务一次性历史保护已开启'
-      : '';
 
     button.title = state.bridgeActive
-      ? `完整历史已启用，共 ${state.realFullCount} 层${lockHint}${autoHint}。`
+      ? `完整历史已启用，共 ${state.realFullCount} 层${lockHint}。`
       : state.realFullCount > 0
-        ? `真实楼层 ${state.realFullCount}；柚月面板会自动加载完整历史${lockHint}${autoHint}。`
-        : `点击手动读取完整历史${lockHint}${autoHint}。`;
+        ? `真实楼层 ${state.realFullCount}；柚月面板会自动加载完整历史${lockHint}。`
+        : `点击手动读取完整历史${lockHint}。`;
   }
 
   function ensureButton() {
@@ -1544,12 +1270,6 @@
 
       if (!state.bridgeActive) return;
 
-      // 后台自动任务由更精细的 350ms 监视器管理。
-      // 通用监视器不得因为面板关闭而把它提前释放。
-      if (state.bridgeOwner === 'auto-task') {
-        return;
-      }
-
       const batchSessionActive = isYuzukiBatchSessionActive();
 
       if (batchSessionActive) {
@@ -1607,14 +1327,13 @@
       'MESSAGE_EDITED',
       'MESSAGE_DELETED',
       'GENERATION_ENDED',
-      'CHARACTER_MESSAGE_RENDERED',
     ];
 
     for (const name of eventNames) {
       const eventName = eventTypes[name];
       if (!eventName) continue;
 
-      const marker = `__yzmSafeGuardV070B2_${name}`;
+      const marker = `__yzmSafeGuardV063_${name}`;
       if (eventSource[marker]) continue;
 
       try {
@@ -1624,41 +1343,14 @@
           patchSaveHooks();
 
           if (name === 'CHAT_CHANGED') {
-            stopAutoBridge({
-              reason: 'chat-changed',
-              cancelPending: true,
-              release: false,
-            });
             deactivateBridge({ silent: true, reason: 'chat-changed' });
             state.realFullCount = 0;
             state.currentChatKey = '';
             setTimeout(() => {
               refreshRealCount({ patchPanel: true });
-              enforceClaudeContextLock({ silent: true, reason: 'chat-changed' });
+        enforceClaudeContextLock({ silent: true, reason: 'visible-refresh' });
               queuePanelScan();
             }, 350);
-            return;
-          }
-
-          if (name === 'MESSAGE_SENT') {
-            // 用户开始下一轮时，上一轮自动任务窗口必须立即结束。
-            stopAutoBridge({
-              reason: 'new-user-message',
-              cancelPending: true,
-              release: false,
-            });
-            deactivateBridge({ silent: true, reason: 'new-user-message' });
-            refreshRealCount({ patchPanel: true });
-            return;
-          }
-
-          if (
-            name === 'MESSAGE_RECEIVED' ||
-            name === 'GENERATION_ENDED' ||
-            name === 'CHARACTER_MESSAGE_RENDERED'
-          ) {
-            refreshRealCount({ patchPanel: true });
-            queueSafeAutomaticBridge(name.toLowerCase());
             return;
           }
 
@@ -1705,7 +1397,7 @@
         clearInterval(boot);
         toast(
           'success',
-          `v${VERSION} 已启用：已修复自动调度被边界占位符拦住的问题。`,
+          `v${VERSION} 已启用：批量任务全程保持完整历史；Claude 上下文锁定为 800,000。`,
           8500,
         );
       }
@@ -1747,9 +1439,6 @@
     refreshRealCount,
     sanitizeRealChat,
     healthCheck,
-    queueSafeAutomaticBridge,
-    stopAutoBridge,
-    getExplicitAutomationStatus,
   };
 
   if (document.readyState === 'loading') {

@@ -1,4 +1,4 @@
-柚月护栏 v0.7.0-beta.2 上传说明
+柚月护栏 v0.6.3 上传说明
 
 覆盖上传：
 1. index.js
@@ -7,7 +7,10 @@
 4. README.md
 
 Commit 可写：
-v0.7.0-beta.2: fix Yuzuki auto summary trigger
+v0.6.3: keep full-history bridge across Yuzuki batch runs
 
-更新后彻底退出 TauriTavern 再重开。
-保持自动小总结开启，正常聊一轮，等待 5–20 秒后检查是否新增 130–139。
+更新并大退重开后：
+1. 保留现有总结，不要全量重跑
+2. 单独追溯 90 → 100
+3. 单独追溯 110 → 120
+4. 检查记忆总结里出现 90-99、110-119
